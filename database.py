@@ -202,10 +202,14 @@ def init_db():
             ('auto_messages_enabled', 'true'),
             ('offers_enabled', 'true'),
             ('gmail_rate', '20'),
+            ('gmail_rate_usdt', '0.30'),
+            ('usdt_to_inr_rate', '90.00'),
+            ('min_withdraw_usdt', '5.00'),
+            ('min_withdraw_upi_usdt', '2.00'),
+            ('max_withdrawal_amount', '50'),
             ('task_submission_enabled', 'true'),
             ('bulk_submission_enabled', 'false'),
-            ('instruction_video_url', ''),
-            ('max_withdrawal_amount', '500')
+            ('instruction_video_url', '')
             ON CONFLICT (key) DO NOTHING
         ''')
 
@@ -214,6 +218,9 @@ def init_db():
             ("users", "notifications_enabled", "INTEGER DEFAULT 1"),
             ("users", "last_submit_time", "TEXT"),
             ("users", "last_activity_time", "TEXT"),
+            ("users", "balance_usdt", "DECIMAL(12,4) DEFAULT 0.0000"),
+            ("users", "total_earned_usdt", "DECIMAL(12,4) DEFAULT 0.0000"),
+            ("users", "preferred_payout_rail", "TEXT DEFAULT 'upi'"),
             ("gmail", "review_date", "TEXT"),
             ("gmail", "rejection_reason", "TEXT"),
             ("gmail", "worker_sent_date", "TEXT"),
@@ -230,13 +237,21 @@ def init_db():
             ("gmail", "batch_id", "TEXT"),
             ("gmail", "totp_secret", "TEXT"),
             ("gmail", "cookie", "TEXT"),
+            ("gmail", "reward_usdt", "DECIMAL(12,4) DEFAULT 0.3000"),
+            ("gmail", "delivery_batch_id", "TEXT"),
+            ("gmail", "dispatched_at", "TEXT"),
             ("gmail", "verification_status", "TEXT DEFAULT 'unchecked'"),
             ("gmail", "verification_checked_at", "TEXT"),
             ("withdrawals", "processed_date", "TEXT"),
             ("withdrawals", "rejection_reason", "TEXT"),
             ("withdrawals", "fee", "DECIMAL(10,2) DEFAULT 0"),
             ("withdrawals", "final_amount", "DECIMAL(10,2)"),
+            ("withdrawals", "amount_usdt", "DECIMAL(12,4)"),
+            ("withdrawals", "inr_exchange_rate", "DECIMAL(10,2)"),
+            ("withdrawals", "inr_payout_amount", "DECIMAL(10,2)"),
+            ("withdrawals", "utr_reference", "TEXT"),
             ("referrals", "rewarded", "INTEGER DEFAULT 0"),
+            ("referral_payouts", "amount_usdt", "DECIMAL(12,4)"),
         ]
 
         for table, column, definition in columns_to_add:

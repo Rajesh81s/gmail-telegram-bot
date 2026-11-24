@@ -537,16 +537,17 @@ def save_task_to_db(user_id: int, task: dict, reward) -> int | None:
             c = conn.cursor()
             c.execute("""
                 INSERT INTO gmail (
-                    user_id, email, password, reward, submit_date,
+                    user_id, email, password, reward, reward_usdt, submit_date,
                     status, task_id, assigned_first_name, assigned_last_name,
                     assigned_dob, assigned_gender, assigned_email, assigned_password,
                     task_status, task_assigned_at, batch_id
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             """, (
                 user_id,
                 task["email"],
                 task["password"],
+                reward,
                 reward,
                 datetime.now().isoformat(),
                 "pending",

@@ -21,6 +21,7 @@ from utils import (
     safe_edit_or_reply, is_blocked, notify_user,
     is_task_submission_enabled, is_bulk_submission_enabled,
     validate_totp_secret, generate_totp, get_totp_remaining_seconds,
+    format_dual_currency, decode_qr_code,
 )
 from generator import generate_single_task, generate_bulk_tasks, save_task_to_db, confirm_task, skip_task
 
@@ -111,14 +112,14 @@ async def handle_get_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📧 <b>Email:</b>        <code>{task['email']}</code>\n"
         f"🔑 <b>Password:</b>     <code>{task['password']}</code>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"💰 <b>Reward:</b> ₹{float(reward):.2f}\n"
+        f"💰 <b>Reward:</b> {format_dual_currency(reward)}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"⚠️ You <b>MUST</b> use the information above to register.\n"
         f"❌ If you use your own information, your task will be <b>REJECTED</b>.\n\n"
         f"After registration:\n"
         f"👉 Tap <b>\"✅ Account Created\"</b> below\n"
-        f"🔐 Then set up 2FA and send the secret key\n\n"
-        f"📝 <i>Tap the details to copy them!</i>"
+        f"🔐 Then send the <b>QR code screenshot</b> (or 2FA secret key)\n\n"
+        f"📝 <i>Tap any credential to copy it!</i>"
     )
 
     from handlers.user import get_active_task_keyboard
@@ -134,7 +135,7 @@ async def handle_get_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Name: {task['first_name']} {task['last_name']}\n"
             f"Email: {task['email']}\n"
             f"Password: {task['password']}\n"
-            f"Reward: ₹{float(reward)}"
+            f"Reward: {format_dual_currency(reward)}"
         )
         await context.bot.send_message(ADMIN_ID, admin_text, parse_mode="HTML")
     except Exception as e:
@@ -214,14 +215,14 @@ async def handle_get_task_text(update: Update, context: ContextTypes.DEFAULT_TYP
         f"📧 <b>Email:</b>        <code>{task['email']}</code>\n"
         f"🔑 <b>Password:</b>     <code>{task['password']}</code>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"💰 <b>Reward:</b> ₹{float(reward):.2f}\n"
+        f"💰 <b>Reward:</b> {format_dual_currency(reward)}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"⚠️ You <b>MUST</b> use the information above to register.\n"
         f"❌ If you use your own information, your task will be <b>REJECTED</b>.\n\n"
         f"After registration:\n"
         f"👉 Tap <b>\"✅ Account Created\"</b> below\n"
-        f"🔐 Then set up 2FA and send the secret key\n\n"
-        f"📝 <i>Tap the details to copy them!</i>"
+        f"🔐 Then send the <b>QR code screenshot</b> (or 2FA secret key)\n\n"
+        f"📝 <i>Tap any credential to copy it!</i>"
     )
 
     from handlers.user import get_active_task_keyboard
@@ -239,7 +240,7 @@ async def handle_get_task_text(update: Update, context: ContextTypes.DEFAULT_TYP
             f"Name: {task['first_name']} {task['last_name']}\n"
             f"Email: {task['email']}\n"
             f"Password: {task['password']}\n"
-            f"Reward: ₹{float(reward)}"
+            f"Reward: {format_dual_currency(reward)}"
         )
         await context.bot.send_message(ADMIN_ID, admin_text, parse_mode="HTML")
     except Exception as e:
@@ -392,7 +393,7 @@ async def receive_bulk_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg_text += (
         f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"💰 <b>Total Reward:</b> ₹{total_reward:.2f} (₹{float(reward):.0f} × {len(saved_ids)})\n"
+        f"💰 <b>Total Reward:</b> {format_dual_currency(Decimal(str(total_reward)))} ({format_dual_currency(reward)} × {len(saved_ids)})\n"
         f"⏰ Complete within <b>{BULK_TASK_EXPIRY_MINUTES // 60} hours</b>\n\n"
         f"⚠️ <b>Create ALL accounts EXACTLY as shown!</b>\n"
         f"🚫 <b>You MUST remove each account from your device after creating it, otherwise it will be considered invalid.</b>"
@@ -423,7 +424,7 @@ async def receive_bulk_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"ID: {uid}\n"
             f"Batch: {batch_id}\n"
             f"Count: {len(saved_ids)} accounts\n"
-            f"Reward: ₹{float(reward)} each\n\n"
+            f"Reward: {format_dual_currency(reward)} each\n\n"
         )
         for idx, (gid, task) in enumerate(saved_ids[:5], 1):
             admin_text += f"{idx}. #{gid} — {task['email']}\n"
@@ -490,23 +491,93 @@ async def handle_task_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data['totp_task_id'] = task_id
 
+    from handlers.user import get_2fa_waiting_keyboard
     await q.message.reply_text(
         f"🔐 <b>2FA Setup Required</b>\n\n"
         f"Task <code>{task_id}</code>\n\n"
-        f"Now set up 2-Step Verification on the Gmail account:\n\n"
-        f"1️⃣ Go to Gmail → Settings → Security\n"
-        f"2️⃣ Enable <b>2-Step Verification</b>\n"
-        f"3️⃣ Choose <b>Authenticator App</b>\n"
-        f"4️⃣ Tap <b>\"Can't scan it?\"</b> to see the secret key\n"
-        f"5️⃣ <b>Copy the secret key</b> and send it here\n\n"
-        f"⬇️ <b>Send the secret key now:</b>",
+        f"Now set up 2-Step Verification on the Google account:\n\n"
+        f"1️⃣ Go to Google → <b>Security</b> → <b>2-Step Verification</b>\n"
+        f"2️⃣ Choose <b>Authenticator app</b>\n"
+        f"3️⃣ Take a <b>screenshot of the QR code</b> (or tap 'Can't scan it?' for text key)\n\n"
+        f"📸 <b>Send the QR code screenshot</b> (or paste the secret key) now:",
+        reply_markup=get_2fa_waiting_keyboard(),
         parse_mode="HTML"
     )
     return TOTP_SECRET
 
 
+async def receive_totp_qr_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receive screenshot of QR code, decode secret, generate OTP, show to user."""
+    user = update.effective_user
+    uid = user.id
+    chat_id = update.effective_chat.id
+
+    task = restore_active_task(uid, context)
+    task_id = task['task_id'] if task else None
+
+    if not task_id:
+        from handlers.user import get_main_reply_keyboard
+        await update.message.reply_text(
+            "⚠️ Session expired. Please get a new task.",
+            reply_markup=get_main_reply_keyboard(uid),
+            parse_mode="HTML"
+        )
+        return ConversationHandler.END
+
+    try:
+        if update.message.photo:
+            photo = update.message.photo[-1]
+            file_obj = await context.bot.get_file(photo.file_id)
+        elif update.message.document and update.message.document.mime_type and update.message.document.mime_type.startswith("image/"):
+            file_obj = await context.bot.get_file(update.message.document.file_id)
+        else:
+            await update.message.reply_text("⚠️ Please send an image or screenshot of the QR code.")
+            return TOTP_SECRET
+
+        image_bytes = await file_obj.download_as_bytearray()
+        success, secret_or_err, decoded_email = decode_qr_code(bytes(image_bytes))
+
+        if not success:
+            await update.message.reply_text(
+                f"❌ <b>QR Code Scan Failed</b>\n\n{secret_or_err}\n\n"
+                f"💡 <i>Tip: Make sure the QR code is clearly visible and not cut off, or tap 'Can't scan it?' in Google and paste the text key here.</i>",
+                parse_mode="HTML"
+            )
+            return TOTP_SECRET
+
+        # Store cleaned secret
+        context.user_data['totp_secret'] = secret_or_err
+        context.user_data['totp_task_id'] = task_id
+
+        # Generate OTP
+        otp = generate_totp(secret_or_err)
+        remaining = get_totp_remaining_seconds()
+
+        task_email = task.get('email') or decoded_email or "Gmail"
+        from handlers.user import get_2fa_keyboard
+        await update.message.reply_text(
+            f"Email: <code>{task_email}</code>\n"
+            f"OTP code: <code>{otp}</code>\n\n"
+            f"Time left for current OTP code: <b>{remaining} seconds</b>\n\n"
+            f"📌 <b>Enter this code in Google to finish activating 2FA!</b>\n"
+            f"🔄 Code expired? Tap <b>Refresh OTP</b> below.\n"
+            f"✅ Once activated in Google, tap <b>Submit Task</b>.",
+            reply_markup=get_2fa_keyboard(),
+            parse_mode="HTML"
+        )
+        return TOTP_SECRET
+
+    except Exception as e:
+        logger.error(f"Error processing QR image from user {uid}: {e}")
+        await update.message.reply_text(
+            "⚠️ Error reading image. Please ensure the QR code is clear, or paste the text key.",
+            parse_mode="HTML"
+        )
+        return TOTP_SECRET
+
+
 async def receive_totp_secret(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Receive 2FA secret, generate OTP, show to user."""
+    """Receive 2FA secret as text, generate OTP, show to user."""
     text = update.message.text.strip()
     task = restore_active_task(update.effective_user.id, context)
     task_id = task['task_id'] if task else None
@@ -519,7 +590,7 @@ async def receive_totp_secret(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not valid:
         await update.message.reply_text(
             f"❌ <b>Invalid Secret Key</b>\n\n{result}\n\n"
-            f"Please send the correct secret key:",
+            f"Please send the correct secret key (or send the QR code screenshot):",
             parse_mode="HTML"
         )
         return TOTP_SECRET
@@ -531,17 +602,15 @@ async def receive_totp_secret(update: Update, context: ContextTypes.DEFAULT_TYPE
     otp = generate_totp(result)
     remaining = get_totp_remaining_seconds()
 
+    task_email = task.get('email') or "Gmail"
     from handlers.user import get_2fa_keyboard
     await update.message.reply_text(
-        f"🔑 <b>Your 2FA Code</b>\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"  📟  <code>{otp}</code>\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"⏱ Valid for <b>{remaining}s</b>\n\n"
-        f"📌 <b>Enter this code in Gmail's 2FA page.</b>\n"
+        f"Email: <code>{task_email}</code>\n"
+        f"OTP code: <code>{otp}</code>\n\n"
+        f"Time left for current OTP code: <b>{remaining} seconds</b>\n\n"
+        f"📌 <b>Enter this code in Google to finish activating 2FA!</b>\n"
         f"🔄 Code expired? Tap <b>Refresh OTP</b> below.\n"
-        f"♾ <i>You can refresh unlimited times!</i>\n\n"
-        f"✅ Once 2FA is activated, tap <b>Submit Task</b>.",
+        f"✅ Once activated in Google, tap <b>Submit Task</b>.",
         reply_markup=get_2fa_keyboard(), parse_mode="HTML"
     )
     return TOTP_SECRET
@@ -757,20 +826,54 @@ async def handle_task_done_text(update: Update, context: ContextTypes.DEFAULT_TY
 
     context.user_data['totp_task_id'] = task_id
 
+    from handlers.user import get_2fa_waiting_keyboard
     await context.bot.send_message(
         chat_id,
         f"🔐 <b>2FA Setup Required</b>\n\n"
         f"Task <code>{task_id}</code>\n\n"
-        f"Now set up 2-Step Verification on the Gmail account:\n\n"
-        f"1️⃣ Go to Gmail → Settings → Security\n"
-        f"2️⃣ Enable <b>2-Step Verification</b>\n"
-        f"3️⃣ Choose <b>Authenticator App</b>\n"
-        f"4️⃣ Tap <b>\"Can't scan it?\"</b> to see the secret key\n"
-        f"5️⃣ <b>Copy the secret key</b> and send it here\n\n"
-        f"⬇️ <b>Send the secret key now:</b>",
+        f"Now set up 2-Step Verification on the Google account:\n\n"
+        f"1️⃣ Go to Google → <b>Security</b> → <b>2-Step Verification</b>\n"
+        f"2️⃣ Choose <b>Authenticator app</b>\n"
+        f"3️⃣ Take a <b>screenshot of the QR code</b> (or tap 'Can't scan it?' for text key)\n\n"
+        f"📸 <b>Send the QR code screenshot</b> (or paste the secret key) now:",
+        reply_markup=get_2fa_waiting_keyboard(),
         parse_mode="HTML"
     )
     return TOTP_SECRET
+
+
+async def handle_how_to_create_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show instructions for creating a Google account."""
+    chat_id = update.effective_chat.id
+    from utils import get_instruction_video_url
+    video_url = get_instruction_video_url()
+
+    text = (
+        "📖 <b>How to Create Account</b>\n\n"
+        "1️⃣ Open an incognito / private browser window.\n"
+        "2️⃣ Go to <b>accounts.google.com/signup</b>.\n"
+        "3️⃣ Enter the <b>First Name, Last Name, DOB, Gender, Email, and Password</b> provided in your task card.\n"
+        "4️⃣ Complete the registration on Google.\n"
+        "5️⃣ Return here and tap <b>✅ Account Created</b>."
+    )
+    if video_url:
+        text += f"\n\n🎥 <b>Video Tutorial:</b> {video_url}"
+    await context.bot.send_message(chat_id, text, parse_mode="HTML")
+
+
+async def handle_how_to_enable_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show instructions for enabling 2FA."""
+    chat_id = update.effective_chat.id
+    text = (
+        "🔐 <b>How to Enable 2FA (Authenticator)</b>\n\n"
+        "1️⃣ In your created Google Account, go to <b>Security</b>.\n"
+        "2️⃣ Under 'How you sign in to Google', tap <b>2-Step Verification</b>.\n"
+        "3️⃣ Scroll down and choose <b>Authenticator app</b>.\n"
+        "4️⃣ Google will display a <b>QR code</b> on your screen.\n"
+        "5️⃣ Take a <b>screenshot of the QR code</b> and send the image directly here!\n"
+        "6️⃣ The bot will instantly give you the 6-digit OTP code to enter in Google to finish activation."
+    )
+    await context.bot.send_message(chat_id, text, parse_mode="HTML")
 
 
 async def handle_task_skip_text(update: Update, context: ContextTypes.DEFAULT_TYPE, task_id: str):
@@ -849,16 +952,16 @@ async def handle_bulk_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         f"📦 <b>Bulk Tasks</b>\n\n"
         f"Select how many accounts to create:\n\n"
-        f"⚡ Current rate: <b>₹{rate:.0f}/account</b>\n"
+        f"⚡ Current rate: <b>${rate:.2f} USDT/account</b>\n"
         f"⏰ Complete within <b>{BULK_TASK_EXPIRY_MINUTES // 60} hours</b>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"│ Qty │  Reward              │\n"
+        f"│ Qty │  Reward               │\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"│  2  │  ₹{rate * 2:.0f}                │\n"
-        f"│  5  │  ₹{rate * 5:.0f}              │\n"
-        f"│ 10  │  ₹{rate * 10:.0f}             │\n"
-        f"│ 15  │  ₹{rate * 15:.0f}             │\n"
-        f"│ 20  │  ₹{rate * 20:.0f}             │\n"
+        f"│  2  │  ${rate * 2:.2f} USDT          │\n"
+        f"│  5  │  ${rate * 5:.2f} USDT          │\n"
+        f"│ 10  │  ${rate * 10:.2f} USDT         │\n"
+        f"│ 15  │  ${rate * 15:.2f} USDT         │\n"
+        f"│ 20  │  ${rate * 20:.2f} USDT         │\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     )
 
@@ -945,7 +1048,7 @@ async def handle_bulk_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text += (
         f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"💰 <b>Total Reward:</b> ₹{total_reward:.2f} (₹{float(reward):.0f} × {len(saved_ids)})\n"
+        f"💰 <b>Total Reward:</b> {format_dual_currency(Decimal(str(total_reward)))} ({format_dual_currency(reward)} × {len(saved_ids)})\n"
         f"⏰ Complete within <b>{BULK_TASK_EXPIRY_MINUTES // 60} hours</b>\n\n"
         f"⚠️ <b>Create ALL accounts EXACTLY as shown!</b>\n"
         f"🚫 <b>You MUST remove each account from your device after creating it, otherwise it will be considered invalid.</b>"
@@ -967,7 +1070,7 @@ async def handle_bulk_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"ID: {uid}\n"
             f"Batch: {batch_id}\n"
             f"Count: {len(saved_ids)} accounts\n"
-            f"Reward: ₹{float(reward)} each\n\n"
+            f"Reward: {format_dual_currency(reward)} each\n\n"
         )
         for idx, (gid, task) in enumerate(saved_ids[:5], 1):
             admin_text += f"{idx}. #{gid} — {task['email']}\n"

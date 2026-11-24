@@ -100,7 +100,16 @@ def get_active_task_keyboard(task_id):
     """Keyboard shown when user has an active task."""
     keyboard = [
         [KeyboardButton("✅ Account Created")],
-        [KeyboardButton("🎥 Video instruction")],
+        [KeyboardButton("❓ How to create account"), KeyboardButton("⁉️ How to enable 2FA")],
+        [KeyboardButton("❌ Cancel Task")],
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
+
+
+def get_2fa_waiting_keyboard():
+    """Keyboard shown while user is prompted to send 2FA QR code screenshot or secret key."""
+    keyboard = [
+        [KeyboardButton("⁉️ How to enable 2FA")],
         [KeyboardButton("❌ Cancel Task")],
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
@@ -111,7 +120,7 @@ def get_2fa_keyboard():
     keyboard = [
         [KeyboardButton("🔄 Refresh OTP")],
         [KeyboardButton("✅ Submit Task")],
-        [KeyboardButton("❌ Cancel Task")],
+        [KeyboardButton("⁉️ How to enable 2FA"), KeyboardButton("❌ Cancel Task")],
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
 
@@ -121,38 +130,50 @@ def get_2fa_keyboard():
 # both callback queries and text message handlers.
 
 def build_balance_content(user_id):
-    """Build balance info content."""
+    """Build balance info content in pure USDT."""
+    from utils import get_gmail_rate_usdt, inr_to_usdt, round_usdt, format_dual_currency
     with get_db() as conn:
         c = conn.cursor()
-        c.execute("SELECT balance, total_gmail, approved_gmail FROM users WHERE user_id=%s", (user_id,))
+        c.execute("SELECT balance, balance_usdt, total_gmail, approved_gmail FROM users WHERE user_id=%s", (user_id,))
         result = c.fetchone()
 
-        c.execute("SELECT COALESCE(SUM(reward), 0) FROM gmail WHERE user_id=%s AND status='pending'", (user_id,))
-        pending = float(list(c.fetchone().values())[0])
+        c.execute("SELECT COALESCE(SUM(reward_usdt), SUM(reward), 0) FROM gmail WHERE user_id=%s AND status='pending'", (user_id,))
+        pending = Decimal(str(list(c.fetchone().values())[0]))
 
-        c.execute("SELECT COALESCE(SUM(reward), 0) FROM gmail WHERE user_id=%s AND status='in_review'", (user_id,))
-        in_review = float(list(c.fetchone().values())[0])
+        c.execute("SELECT COALESCE(SUM(reward_usdt), SUM(reward), 0) FROM gmail WHERE user_id=%s AND status='in_review'", (user_id,))
+        in_review = Decimal(str(list(c.fetchone().values())[0]))
 
-    bal = float(result['balance']) if result else 0
+    task_rate = get_gmail_rate_usdt()
+
+    # Determine user balance in USDT
+    if result and result.get('balance_usdt') is not None and result['balance_usdt'] > 0:
+        bal_usdt = Decimal(str(result['balance_usdt']))
+    elif result and result.get('balance'):
+        bal_usdt = Decimal(str(result['balance']))
+    else:
+        bal_usdt = Decimal("0.00")
+
     approved = result['approved_gmail'] if result else 0
     total = result['total_gmail'] if result else 0
-    rate = float(calc_rate(user_id))
     total_pending = pending + in_review
+    pending_usdt = round_usdt(total_pending)
 
     text = (
-        f"💰 <b>Balance: ₹{bal:.2f}</b>\n\n"
+        f"💰 <b>Your Wallet &amp; Earnings</b>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"⚡ <b>Rate:</b> ₹{rate:.0f}/account\n\n"
+        f"💵 <b>Available Balance:</b>\n"
+        f"   <b>{format_dual_currency(bal_usdt)}</b>\n\n"
+        f"⚡ <b>Rate per Gmail:</b>\n"
+        f"   <b>{format_dual_currency(task_rate)}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🔄 <b>Under Verification</b>\n"
-        f"├ ⏳ Pending review: ₹{pending:.2f}\n"
-        f"├ 🔍 In review: ₹{in_review:.2f}\n"
-        f"└ 💰 Total: ₹{total_pending:.2f}\n\n"
-        f"ℹ️ <i>\"In review\" = admin forwarded your Gmail to verification team.</i>\n\n"
+        f"├ ⏳ Pending / In Review: {format_dual_currency(pending_usdt)}\n"
+        f"└ ℹ️ <i>Verified accounts are credited automatically.</i>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 <b>Statistics</b>\n"
-        f"├ ✅ Approved (all time): {approved}\n"
-        f"└ 📧 Total submitted: {total}\n"
+        f"📊 <b>Account Statistics</b>\n"
+        f"├ ✅ Approved Tasks: <b>{approved}</b>\n"
+        f"├ 📧 Total Submitted: <b>{total}</b>\n"
+        f"└ 💎 Payout Rails: <b>USDT / UPI</b>\n"
     )
     kb = None
     return text, kb
@@ -160,9 +181,10 @@ def build_balance_content(user_id):
 
 def build_profile_content(user_id):
     """Build profile info content."""
+    from utils import get_usdt_to_inr_rate, get_gmail_rate_usdt, inr_to_usdt, format_dual_currency
     with get_db() as conn:
         c = conn.cursor()
-        c.execute("SELECT balance, approved_gmail, usdt_address, upi_id, joined_date FROM users WHERE user_id=%s",
+        c.execute("SELECT balance, balance_usdt, approved_gmail, usdt_address, upi_id, joined_date FROM users WHERE user_id=%s",
                   (user_id,))
         result = c.fetchone()
         c.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=%s AND rewarded=1", (user_id,))
@@ -171,27 +193,31 @@ def build_profile_content(user_id):
     if not result:
         return "❌ Profile not found.", None
 
-    bal = float(result['balance'])
+    rate = get_usdt_to_inr_rate()
+    task_rate = get_gmail_rate_usdt()
+    bal_usdt = Decimal(str(result.get('balance_usdt') or 0))
+    if bal_usdt == 0 and result.get('balance'):
+        bal_usdt = inr_to_usdt(Decimal(str(result['balance'])), rate=rate)
+
     approved = result['approved_gmail']
     usdt = result['usdt_address']
     upi = result['upi_id']
     joined = result['joined_date']
-    rate = float(calc_rate(user_id))
     joined_display = joined[:10] if joined else "N/A"
 
     text = (
-        f"👤 <b>Profile</b>\n\n"
+        f"👤 <b>User Profile</b>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💰 <b>Balance:</b> ₹{bal:.2f}\n"
-        f"⚡ <b>Rate:</b> ₹{rate:.0f}/account\n\n"
+        f"💰 <b>Balance:</b> {format_dual_currency(bal_usdt, rate=rate)}\n"
+        f"⚡ <b>Task Rate:</b> {format_dual_currency(task_rate, rate=rate)}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 <b>Activity</b>\n"
-        f"├ ✅ Approved (all time): <b>{approved}</b>\n"
+        f"📊 <b>Activity &amp; Reputation</b>\n"
+        f"├ ✅ Approved: <b>{approved}</b>\n"
         f"└ 👥 Referrals: <b>{ref_count}</b>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"💳 <b>Payment Methods</b>\n"
-        f"├ 📱 UPI: {'✅ Set' if upi else '❌ Not set'}\n"
-        f"└ 💎 USDT: {'✅ Set' if usdt else '❌ Not set'}\n\n"
+        f"├ 📱 UPI: {'<code>' + upi + '</code>' if upi else '❌ Not set'}\n"
+        f"└ 💎 USDT (BEP20): {'<code>' + usdt[:6] + '...' + usdt[-4:] + '</code>' if usdt else '❌ Not set'}\n\n"
         f"📅 <b>Joined:</b> {joined_display}"
     )
     kb = None  # Payment Methods is now a keyboard button
@@ -209,22 +235,22 @@ def build_help_content():
         f"2️⃣ Create the Gmail account <b>exactly</b> as shown\n"
         f"3️⃣ Tap <b>\"Done\"</b> — submission goes under review\n"
         f"4️⃣ Approved = reward credited!\n"
-        f"5️⃣ Withdraw once balance hits ₹100\n\n"
+        f"5️⃣ Withdraw once balance hits $2.00 USDT\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📦 <b>Task Types</b>\n"
         f"• <b>Single Task</b> — one account at a time\n"
         f"• <b>Bulk Tasks</b> — up to 20 accounts\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"💰 <b>Reward</b>\n"
-        f"• Fixed rate: <b>₹{rate:.0f}</b>/account for everyone\n\n"
+        f"• Fixed rate: <b>${rate:.2f} USDT</b>/account for everyone\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🎁 <b>Bonus Earnings</b>\n"
-        f"• Channel join: <b>₹1</b>\n"
-        f"• Referral: <b>₹5</b>/friend\n\n"
+        f"• Channel join: <b>$0.01 USDT</b>\n"
+        f"• Referral: <b>$0.030 USDT</b> (Month 1) / <b>$0.015 USDT</b> (Lifetime)\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"💸 <b>Withdrawals</b>\n"
-        f"• Minimum: ₹100\n"
-        f"• Fee: {WITHDRAWAL_FEE_PERCENT}% (min ₹{WITHDRAWAL_FEE_MIN})\n"
+        f"• Minimum: $2.00 USDT (UPI) / $5.00 USDT (Crypto)\n"
+        f"• Fee: {WITHDRAWAL_FEE_PERCENT}% (min ${float(WITHDRAWAL_FEE_MIN):.2f} USDT)\n"
         f"• Limit: {MAX_WITHDRAWALS_PER_DAY}/day\n"
         f"• Methods: UPI &amp; USDT (BEP20)\n\n"
         f"📩 Need help? @{SUPPORT_USERNAME}"
@@ -306,14 +332,14 @@ def build_referral_content(user_id, bot_username):
         f"🆕👥 <b>New referrals who joined in the last 30 days:</b> {new_refs_30d}\n"
         f"🆕💪 <b>New referrals (last 30 days) with at least one Gmail account:</b> {new_refs_with_gmail_30d}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"🔥 <b>MONTH 1 (First 30 Days):</b> Get ₹10 for EVERY approved Gmail they submit!\n"
-        f"♻️ <b>MONTH 2+ (Lifetime recurring):</b> Get ₹5 for EVERY approved Gmail they submit from Day 31 onwards!\n"
+        f"🔥 <b>MONTH 1 (First 30 Days):</b> Get <b>$0.030 USDT</b> (10%) for EVERY approved Gmail!\n"
+        f"♻️ <b>MONTH 2+ (Lifetime recurring):</b> Get <b>$0.015 USDT</b> (5%) for EVERY approved Gmail!\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💸👥 <b>Your profit for the last 30 days, from all referrals:</b> ₹{profit_30d:.2f}\n"
-        f"💸🆕 <b>Your total profit from all referrals:</b> ₹{total_profit:.2f}\n\n"
+        f"💸👥 <b>Your referral profit (last 30 days):</b> ${profit_30d:.2f} USDT\n"
+        f"💸🆕 <b>Your all-time referral profit:</b> ${total_profit:.2f} USDT\n\n"
         f"🔗 <b>Your Referral Link:</b>\n"
         f"<code>{ref_link}</code>\n\n"
-        f"<i>Share this link to earn ₹10 per Gmail in the first month and ₹5 per Gmail from the second month onwards!</i>"
+        f"<i>Share your link to earn passive recurring commissions on every task your friends complete!</i>"
     )
     kb = None  # Leaderboard is now a keyboard button
     return text, kb
@@ -419,16 +445,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await notify_user(context, ref_id,
                             f"🎉 <b>New Referral!</b>\n\n"
                             f"<b>{user.first_name}</b> joined via your link.\n"
-                            f"You'll earn <b>₹{REFERRAL_RATE_MONTH_1}</b> for every approved Gmail they submit this month, and <b>₹{REFERRAL_RATE_MONTH_2_PLUS}</b> thereafter!")
+                            f"You'll earn <b>${REFERRAL_RATE_MONTH_1} USDT</b> for every approved Gmail they submit this month, and <b>${REFERRAL_RATE_MONTH_2_PLUS} USDT</b> thereafter!")
                     except psycopg2.IntegrityError:
                         pass
 
     # Fetch dashboard data
     with get_db() as conn:
         c = conn.cursor()
-        c.execute("SELECT balance, approved_gmail, channel_claimed FROM users WHERE user_id=%s", (user.id,))
+        c.execute("SELECT balance, balance_usdt, approved_gmail, channel_claimed FROM users WHERE user_id=%s", (user.id,))
         result = c.fetchone()
-        bal = float(result['balance']) if result else 0
+        bal = float(result['balance_usdt']) if (result and result.get('balance_usdt') is not None and result['balance_usdt'] > 0) else (float(result['balance']) if result and result.get('balance') else 0.0)
         approved = result['approved_gmail'] if result else 0
         claimed = result['channel_claimed'] if result else 0
 
@@ -442,8 +468,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Welcome, <b>{user.first_name}</b>! 👋\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 <b>Your Dashboard</b>\n"
-        f"├ 💰 Balance: <b>₹{bal:.2f}</b>\n"
-        f"├ ⚡ Rate: <b>₹{rate:.0f}/account</b>\n"
+        f"├ 💰 Balance: <b>${bal:.2f} USDT</b>\n"
+        f"├ ⚡ Rate: <b>${rate:.2f} USDT/account</b>\n"
         f"├ ✅ Approved: <b>{approved}</b>\n"
         f"└ ⏳ Pending: <b>{pending}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -455,11 +481,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     main_kb = get_main_reply_keyboard(user.id)
 
     if not claimed:
-        text += f"\n\n⚡ Join <b>{TELEGRAM_CHANNEL}</b> to claim ₹1 bonus!"
+        text += f"\n\n⚡ Join <b>{TELEGRAM_CHANNEL}</b> to claim $0.01 USDT bonus!"
         channel_url = f"https://t.me/{TELEGRAM_CHANNEL.lstrip('@')}"
         inline_kb = [
             [InlineKeyboardButton("📢 Join Channel", url=channel_url)],
-            [InlineKeyboardButton("🎁 Claim ₹1 Bonus", callback_data="claim_channel")],
+            [InlineKeyboardButton("🎁 Claim $0.01 Bonus", callback_data="claim_channel")],
         ]
         # First: set the persistent reply keyboard (user always has navigation)
         await update.message.reply_text(
@@ -492,17 +518,17 @@ async def user_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with get_db() as conn:
                 c = conn.cursor()
                 c.execute("""
-                    UPDATE users SET balance=balance+1, channel_claimed=1
+                    UPDATE users SET balance_usdt=balance_usdt+0.01, balance=balance+0.01, channel_claimed=1
                     WHERE user_id=%s AND channel_claimed=0
                     RETURNING user_id
                 """, (q.from_user.id,))
                 result = c.fetchone()
                 if result:
                     conn.commit()
-                    await q.answer("✅ ₹1 added to your balance!", show_alert=True)
+                    await q.answer("✅ $0.01 USDT added to your balance!", show_alert=True)
                     # Send bonus message WITH the persistent reply keyboard
                     await q.message.reply_text(
-                        "🎉 <b>Bonus Credited: ₹1</b>\n\nThank you for joining our channel!\n\n"
+                        "🎉 <b>Bonus Credited: $0.01 USDT</b>\n\nThank you for joining our channel!\n\n"
                         "💡 <i>Use the keyboard buttons below to navigate.</i>",
                         parse_mode="HTML",
                         reply_markup=get_main_reply_keyboard(q.from_user.id),
@@ -538,10 +564,10 @@ async def user_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📊 <b>Earnings Dashboard</b>\n\n"
             f"<b>Period:</b> {period_names.get(period, 'All Time')}\n\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"├ 📧 Gmail: <b>₹{stats['gmail']:.2f}</b>\n"
-            f"├ 👥 Referrals: <b>₹{stats['referral']:.2f}</b>\n"
-            f"├ 📢 Channel bonus: <b>₹{stats['channel']:.2f}</b>\n"
-            f"└ 💰 Total: <b>₹{stats['total']:.2f}</b>\n"
+            f"├ 📧 Gmail: <b>${stats['gmail']:.2f} USDT</b>\n"
+            f"├ 👥 Referrals: <b>${stats['referral']:.2f} USDT</b>\n"
+            f"├ 📢 Channel bonus: <b>${stats['channel']:.2f} USDT</b>\n"
+            f"└ 💰 Total: <b>${stats['total']:.2f} USDT</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━"
         )
 
@@ -592,7 +618,7 @@ async def user_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     name_tag = f" ({sub['assigned_first_name']} {sub['assigned_last_name']})"
 
                 text += f"{emoji} <code>{mask_email(sub['email'])}</code>{name_tag}\n"
-                text += f"    {sub['status'].title()} — ₹{reward_val:.2f}"
+                text += f"    {sub['status'].title()} — ${reward_val:.2f} USDT"
                 if sub['rejection_reason']:
                     text += f"\n    <i>Reason: {sub['rejection_reason']}</i>"
                 text += "\n\n"
@@ -634,8 +660,8 @@ async def user_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 fee = float(w['fee']) if w['fee'] is not None else 0
                 final_amount = float(w['final_amount']) if w['final_amount'] is not None else float(w['amount'])
 
-                text += f"{emoji} {method_emoji} <b>₹{float(w['amount']):.2f}</b>\n"
-                text += f"    Fee: ₹{fee:.2f} | Final: ₹{final_amount:.2f}\n"
+                text += f"{emoji} {method_emoji} <b>${float(w['amount']):.2f} USDT</b>\n"
+                text += f"    Fee: ${fee:.2f} USDT | Final: ${final_amount:.2f} USDT\n"
                 text += f"    {w['status'].title()} — {w['request_date'][:10]}\n"
                 if w['rejection_reason']:
                     text += f"    <i>Reason: {w['rejection_reason']}</i>\n"
@@ -695,9 +721,9 @@ async def user_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📜 <b>Terms &amp; Conditions</b>\n\n"
             f"1. Create accounts exactly as shown in tasks\n"
             f"2. No fake or stolen accounts\n"
-            f"3. Minimum withdrawal: ₹100\n"
+            f"3. Minimum withdrawal: $2.00 USDT (UPI) / $5.00 USDT (Crypto)\n"
             f"4. Maximum {MAX_WITHDRAWALS_PER_DAY} withdrawals/day\n"
-            f"5. Withdrawal fee: {WITHDRAWAL_FEE_PERCENT}% (min ₹{WITHDRAWAL_FEE_MIN})\n"
+            f"5. Withdrawal fee: {WITHDRAWAL_FEE_PERCENT}% (min ${float(WITHDRAWAL_FEE_MIN):.2f} USDT)\n"
             f"6. Processing time: 24-48 hours\n"
             f"7. Only {', '.join(ALLOWED_DOMAINS)} allowed\n"
             f"8. Referral rewards after first verified task\n"

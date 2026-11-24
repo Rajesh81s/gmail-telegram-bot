@@ -11,13 +11,17 @@ from telegram.ext import ContextTypes, ConversationHandler
 
 from config import (
     ADMIN_ID, WITHDRAWAL_FEE_PERCENT, WITHDRAWAL_FEE_MIN,
+    WITHDRAWAL_FEE_MIN_USDT, WITHDRAWAL_FEE_MIN_INR,
+    DEFAULT_MIN_WITHDRAW_USDT, DEFAULT_MIN_WITHDRAW_UPI_USDT,
     MAX_WITHDRAWALS_PER_DAY, MAX_PENDING_WITHDRAWALS,
     WITHDRAW_AMT, WITHDRAW_CONFIRM, UPI_ID, USDT_ADDRESS,
 )
 from database import get_db
 from utils import (
     validate_upi, validate_usdt_address, can_withdraw_today,
-    calculate_withdrawal_fee, round_decimal, safe_edit_or_reply,
+    calculate_withdrawal_fee_usdt, round_decimal, round_usdt,
+    get_usdt_to_inr_rate, inr_to_usdt, usdt_to_inr,
+    format_dual_currency, safe_edit_or_reply,
     is_blocked, notify_user, get_max_withdrawal_amount,
 )
 
@@ -34,52 +38,56 @@ async def handle_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     with get_db() as conn:
         c = conn.cursor()
-        c.execute("SELECT balance, usdt_address, upi_id FROM users WHERE user_id=%s", (uid,))
+        c.execute("SELECT balance, balance_usdt, usdt_address, upi_id FROM users WHERE user_id=%s", (uid,))
         result = c.fetchone()
 
         c.execute("SELECT COUNT(*) FROM withdrawals WHERE user_id=%s AND status='pending'", (uid,))
         pending_count = list(c.fetchone().values())[0]
 
     can_withdraw, remaining = can_withdraw_today(uid)
+    rate = get_usdt_to_inr_rate()
 
     if result:
-        bal = float(result['balance'])
+        bal_usdt = Decimal(str(result.get('balance_usdt') or 0))
+        if bal_usdt == 0 and result.get('balance'):
+            bal_usdt = inr_to_usdt(Decimal(str(result['balance'])), rate=rate)
+
         usdt = result['usdt_address']
         upi = result['upi_id']
 
         if not can_withdraw:
             text = (
-                f"💸 <b>Withdraw</b>\n\n"
-                f"💰 Balance: <b>₹{bal:.2f}</b>\n\n"
+                f"💸 <b>Withdraw Funds</b>\n\n"
+                f"💰 Balance: <b>{format_dual_currency(bal_usdt, rate=rate)}</b>\n\n"
                 f"⚠️ Daily withdrawal limit reached.\n"
                 f"Max {MAX_WITHDRAWALS_PER_DAY}/day. Try again tomorrow."
             )
             kb = [[InlineKeyboardButton("🔙 Back", callback_data="menu")]]
         elif pending_count >= MAX_PENDING_WITHDRAWALS:
             text = (
-                f"💸 <b>Withdraw</b>\n\n"
-                f"💰 Balance: <b>₹{bal:.2f}</b>\n\n"
+                f"💸 <b>Withdraw Funds</b>\n\n"
+                f"💰 Balance: <b>{format_dual_currency(bal_usdt, rate=rate)}</b>\n\n"
                 f"⚠️ {pending_count} pending requests. Please wait for processing."
             )
             kb = [[InlineKeyboardButton("🔙 Back", callback_data="menu")]]
-        elif bal < 100:
+        elif bal_usdt < DEFAULT_MIN_WITHDRAW_UPI_USDT:
             text = (
-                f"💸 <b>Withdraw</b>\n\n"
-                f"💰 Balance: <b>₹{bal:.2f}</b>\n\n"
-                f"⚠️ Minimum withdrawal: <b>₹100</b>\n"
+                f"💸 <b>Withdraw Funds</b>\n\n"
+                f"💰 Balance: <b>{format_dual_currency(bal_usdt, rate=rate)}</b>\n\n"
+                f"⚠️ Minimum withdrawal: <b>${float(DEFAULT_MIN_WITHDRAW_UPI_USDT):.2f} USDT</b> (via UPI) or <b>${float(DEFAULT_MIN_WITHDRAW_USDT):.2f} USDT</b> (via Crypto)\n"
                 f"Keep submitting tasks to reach the threshold!"
             )
             kb = [[InlineKeyboardButton("🔙 Back", callback_data="menu")]]
         else:
-            example_fee, example_final = calculate_withdrawal_fee(Decimal("100"))
             text = (
-                f"💸 <b>Withdraw</b>\n\n"
+                f"💸 <b>Withdraw Funds</b>\n\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"💰 Balance: <b>₹{bal:.2f}</b>\n"
+                f"💰 Balance: <b>{format_dual_currency(bal_usdt)}</b>\n"
                 f"📊 Today: <b>{remaining}/{MAX_WITHDRAWALS_PER_DAY}</b> remaining\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"💡 <b>Fee:</b> {WITHDRAWAL_FEE_PERCENT}% (min ₹{WITHDRAWAL_FEE_MIN})\n"
-                f"<i>Example: ₹100 → Fee ₹{float(example_fee):.0f} → You get ₹{float(example_final):.0f}</i>\n\n"
+                f"💡 <b>Available Methods:</b>\n"
+                f"📱 <b>UPI:</b> Min ${float(DEFAULT_MIN_WITHDRAW_UPI_USDT):.2f} USDT (Fee: 5%, min ${float(WITHDRAWAL_FEE_MIN_USDT):.2f} USDT)\n"
+                f"💎 <b>USDT (BEP20):</b> Min ${float(DEFAULT_MIN_WITHDRAW_USDT):.2f} USDT (Fee: 5%, min ${float(WITHDRAWAL_FEE_MIN_USDT):.2f} USDT)\n\n"
                 f"Choose withdrawal method:"
             )
             kb = [
@@ -104,6 +112,7 @@ async def handle_withdraw_method(update: Update, context: ContextTypes.DEFAULT_T
     q = update.callback_query
     await q.answer()
     d = q.data
+    rate = get_usdt_to_inr_rate()
 
     if d == "withdraw_upi":
         with get_db() as conn:
@@ -116,9 +125,9 @@ async def handle_withdraw_method(update: Update, context: ContextTypes.DEFAULT_T
         context.user_data['withdraw_method'] = 'upi'
         await safe_edit_or_reply(
             q,
-            "💸 <b>Withdraw via UPI</b>\n\n"
-            "Enter amount (minimum ₹100):\n\n"
-            "/cancel to abort",
+            f"💸 <b>Withdraw via UPI</b>\n\n"
+            f"Enter amount in <b>USDT</b> (Minimum ${float(DEFAULT_MIN_WITHDRAW_UPI_USDT):.2f} USDT):\n\n"
+            f"/cancel to abort",
         )
         return WITHDRAW_AMT
 
@@ -133,9 +142,9 @@ async def handle_withdraw_method(update: Update, context: ContextTypes.DEFAULT_T
         context.user_data['withdraw_method'] = 'usdt'
         await safe_edit_or_reply(
             q,
-            "💸 <b>Withdraw via USDT (BEP20)</b>\n\n"
-            "Enter amount (minimum ₹100):\n\n"
-            "/cancel to abort",
+            f"💸 <b>Withdraw via USDT (BEP20)</b>\n\n"
+            f"Enter amount in <b>USDT</b> (Minimum ${float(DEFAULT_MIN_WITHDRAW_USDT):.2f} USDT):\n\n"
+            f"/cancel to abort",
         )
         return WITHDRAW_AMT
 
@@ -239,7 +248,9 @@ async def handle_withdraw_upi_text(update: Update, context: ContextTypes.DEFAULT
     context.user_data['withdraw_method'] = 'upi'
     await context.bot.send_message(
         update.effective_chat.id,
-        "💸 <b>Withdraw via UPI</b>\n\nEnter amount (minimum ₹100):\n\n/cancel to abort",
+        f"💸 <b>Withdraw via UPI</b>\n\n"
+        f"Enter amount in <b>USDT</b> (Minimum ${float(DEFAULT_MIN_WITHDRAW_UPI_USDT):.2f} USDT):\n\n"
+        f"/cancel to abort",
         reply_markup=get_main_reply_keyboard(), parse_mode="HTML"
     )
     return WITHDRAW_AMT
@@ -275,7 +286,9 @@ async def handle_withdraw_usdt_text(update: Update, context: ContextTypes.DEFAUL
     context.user_data['withdraw_method'] = 'usdt'
     await context.bot.send_message(
         update.effective_chat.id,
-        "💸 <b>Withdraw via USDT (BEP20)</b>\n\nEnter amount (minimum ₹100):\n\n/cancel to abort",
+        f"💸 <b>Withdraw via USDT (BEP20)</b>\n\n"
+        f"Enter amount in <b>USDT</b> (Minimum ${float(DEFAULT_MIN_WITHDRAW_USDT):.2f} USDT):\n\n"
+        f"/cancel to abort",
         reply_markup=get_main_reply_keyboard(), parse_mode="HTML"
     )
     return WITHDRAW_AMT
@@ -364,22 +377,26 @@ async def receive_usdt(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def receive_withdraw_amt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Receive withdrawal amount and show confirmation before processing."""
+    """Receive withdrawal amount in USDT and show confirmation before processing."""
     try:
         amount = Decimal(update.message.text.strip())
+        method = context.user_data.get('withdraw_method', 'upi')
+        rate = get_usdt_to_inr_rate()
 
-        if amount < 100:
+        min_req = DEFAULT_MIN_WITHDRAW_UPI_USDT if method == 'upi' else DEFAULT_MIN_WITHDRAW_USDT
+        if amount < min_req:
             await update.message.reply_text(
-                "⚠️ <b>Minimum withdrawal: ₹100</b>\n\nEnter valid amount or /cancel",
+                f"⚠️ <b>Minimum withdrawal for {method.upper()}: ${float(min_req):.2f} USDT</b>\n\n"
+                f"Please enter a valid amount or /cancel",
                 parse_mode="HTML"
             )
             return WITHDRAW_AMT
 
-        # Check max withdrawal limit (admin-controlled)
+        # Check max withdrawal limit (admin-controlled in USDT)
         max_withdrawal = get_max_withdrawal_amount()
         if amount > max_withdrawal:
             await update.message.reply_text(
-                f"⚠️ <b>Maximum withdrawal: ₹{float(max_withdrawal):.0f}</b> per request\n\n"
+                f"⚠️ <b>Maximum withdrawal: ${float(max_withdrawal):.2f} USDT</b> per request\n\n"
                 f"Enter a smaller amount or /cancel",
                 parse_mode="HTML"
             )
@@ -393,12 +410,9 @@ async def receive_withdraw_amt(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             return ConversationHandler.END
 
-        method = context.user_data.get('withdraw_method')
-        fee, final_amount = calculate_withdrawal_fee(amount)
-
         with get_db() as conn:
             c = conn.cursor()
-            c.execute("SELECT balance, usdt_address, upi_id FROM users WHERE user_id=%s",
+            c.execute("SELECT balance, balance_usdt, usdt_address, upi_id FROM users WHERE user_id=%s",
                       (update.effective_user.id,))
             result = c.fetchone()
 
@@ -406,50 +420,69 @@ async def receive_withdraw_amt(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("⚠️ Error occurred", parse_mode="HTML")
             return ConversationHandler.END
 
-        balance = round_decimal(result['balance'])
+        bal_usdt = Decimal(str(result.get('balance_usdt') or 0))
+        if bal_usdt == 0 and result.get('balance'):
+            bal_usdt = inr_to_usdt(Decimal(str(result['balance'])), rate=rate)
 
-        if amount > balance:
+        if amount > bal_usdt:
             await update.message.reply_text(
                 f"⚠️ <b>Insufficient Balance</b>\n\n"
-                f"Balance: ₹{float(balance):.2f}\nRequested: ₹{float(amount):.2f}",
+                f"Available: <b>{format_dual_currency(bal_usdt, rate=rate)}</b>\n"
+                f"Requested: <b>${float(amount):.2f} USDT</b>",
                 parse_mode="HTML"
             )
             return WITHDRAW_AMT
 
         payment_info = result['upi_id'] if method == 'upi' else result['usdt_address']
-        method_name = "UPI" if method == 'upi' else "USDT BEP20"
+        method_name = "UPI" if method == 'upi' else "USDT (BEP20)"
+
+        fee_usdt, final_usdt, fee_inr, final_inr = calculate_withdrawal_fee_usdt(amount, method=method, rate=rate)
 
         # Store details for confirmation step
-        context.user_data['withdraw_amount'] = str(amount)
-        context.user_data['withdraw_fee'] = str(fee)
-        context.user_data['withdraw_final'] = str(final_amount)
+        context.user_data['withdraw_amount_usdt'] = str(amount)
+        context.user_data['withdraw_rate'] = str(rate)
         context.user_data['withdraw_payment_info'] = payment_info
         context.user_data['withdraw_method_name'] = method_name
+        context.user_data['withdraw_fee'] = str(fee_usdt)
+        context.user_data['withdraw_final'] = str(final_usdt)
+        context.user_data['withdraw_payout_amount'] = str(final_usdt)
 
-        # Show confirmation with fee breakdown
         kb = [
             [InlineKeyboardButton("✅ Confirm Withdrawal", callback_data="wdraw_yes")],
             [InlineKeyboardButton("❌ Cancel", callback_data="wdraw_no")],
         ]
 
-        await update.message.reply_text(
-            f"⚠️ <b>Confirm Withdrawal</b>\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"💰 Amount: <b>₹{float(amount):.2f}</b>\n"
-            f"📊 Fee ({WITHDRAWAL_FEE_PERCENT}%): ₹{float(fee):.2f}\n"
-            f"💵 You'll receive: <b>₹{float(final_amount):.2f}</b>\n"
-            f"💳 Method: {method_name}\n"
-            f"📋 Payment: <code>{payment_info}</code>\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"⚠️ <i>This cannot be undone. Please verify details.</i>",
-            reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML"
-        )
+        if method == 'upi':
+            text = (
+                f"⚠️ <b>Confirm UPI Withdrawal</b>\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"💰 Requested: <b>${float(amount):.2f} USDT</b>\n"
+                f"📱 UPI ID: <code>{payment_info}</code>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"📊 Platform Fee (5%): ${float(fee_usdt):.2f} USDT\n"
+                f"🎉 <b>You will receive: ${float(final_usdt):.2f} USDT</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"⚠️ <i>This cannot be undone. Please verify your UPI ID.</i>"
+            )
+        else:
+            text = (
+                f"⚠️ <b>Confirm USDT Crypto Withdrawal</b>\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"💰 Requested: <b>${float(amount):.2f} USDT</b>\n"
+                f"💎 USDT (BEP20): <code>{payment_info}</code>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"📊 Platform Fee (5%): ${float(fee_usdt):.2f} USDT\n"
+                f"🎉 <b>You will receive: ${float(final_usdt):.2f} USDT</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"⚠️ <i>This cannot be undone. Please verify your BEP20 address.</i>"
+            )
 
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
         return WITHDRAW_CONFIRM
 
     except (ValueError, InvalidOperation):
         await update.message.reply_text(
-            "❌ <b>Invalid amount</b>\n\nEnter a valid number or /cancel",
+            "❌ <b>Invalid amount</b>\n\nEnter a valid number (e.g. 5.00) or /cancel",
             parse_mode="HTML"
         )
         return WITHDRAW_AMT
@@ -465,14 +498,16 @@ async def confirm_withdrawal(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await q.answer()
 
     uid = q.from_user.id
-    amount = Decimal(context.user_data.get('withdraw_amount', '0'))
+    amount_usdt = Decimal(context.user_data.get('withdraw_amount_usdt', '0'))
+    rate = Decimal(context.user_data.get('withdraw_rate', '90.00'))
     fee = Decimal(context.user_data.get('withdraw_fee', '0'))
     final_amount = Decimal(context.user_data.get('withdraw_final', '0'))
+    payout_amount = Decimal(context.user_data.get('withdraw_payout_amount', '0'))
     method = context.user_data.get('withdraw_method')
     payment_info = context.user_data.get('withdraw_payment_info')
     method_name = context.user_data.get('withdraw_method_name')
 
-    if not amount or not method or not payment_info:
+    if not amount_usdt or not method or not payment_info:
         await q.edit_message_text("⚠️ Session expired. Please start over.", parse_mode="HTML")
         context.user_data.clear()
         return ConversationHandler.END
@@ -481,8 +516,7 @@ async def confirm_withdrawal(update: Update, context: ContextTypes.DEFAULT_TYPE)
         with get_db() as conn:
             c = conn.cursor()
 
-            # Lock the user row to prevent race conditions
-            c.execute("SELECT balance FROM users WHERE user_id=%s FOR UPDATE", (uid,))
+            c.execute("SELECT balance, balance_usdt FROM users WHERE user_id=%s FOR UPDATE", (uid,))
             result = c.fetchone()
 
             if not result:
@@ -490,24 +524,29 @@ async def confirm_withdrawal(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 context.user_data.clear()
                 return ConversationHandler.END
 
-            balance = round_decimal(result['balance'])
+            bal_usdt = Decimal(str(result.get('balance_usdt') or 0))
+            if bal_usdt == 0 and result.get('balance'):
+                bal_usdt = inr_to_usdt(Decimal(str(result['balance'])), rate=rate)
 
-            if amount > balance:
+            if amount_usdt > bal_usdt:
                 await q.edit_message_text(
                     f"⚠️ <b>Insufficient Balance</b>\n\n"
-                    f"Balance: ₹{float(balance):.2f}\nRequested: ₹{float(amount):.2f}\n\n"
+                    f"Balance: {format_dual_currency(bal_usdt, rate=rate)}\nRequested: ${float(amount_usdt):.2f} USDT\n\n"
                     f"Your balance may have changed. Please try again.",
                     parse_mode="HTML"
                 )
                 context.user_data.clear()
                 return ConversationHandler.END
 
-            # Atomic deduction with row-level check
+            # Deduct from balance_usdt and keep legacy balance in sync
+            inr_deduction = round_decimal(amount_usdt * rate)
             c.execute("""
-                UPDATE users SET balance=balance-%s
-                WHERE user_id=%s AND balance >= %s
-                RETURNING balance
-            """, (amount, uid, amount))
+                UPDATE users
+                SET balance_usdt = balance_usdt - %s,
+                    balance = GREATEST(0, balance - %s)
+                WHERE user_id=%s AND (balance_usdt >= %s OR balance >= %s)
+                RETURNING balance_usdt
+            """, (amount_usdt, inr_deduction, uid, amount_usdt, inr_deduction))
 
             updated = c.fetchone()
             if not updated:
@@ -517,11 +556,18 @@ async def confirm_withdrawal(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 context.user_data.clear()
                 return ConversationHandler.END
 
-            # Create withdrawal record
-            c.execute("""INSERT INTO withdrawals (user_id, amount, fee, final_amount, method, payment_info, request_date)
-                         VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""",
-                      (uid, amount, fee, final_amount, method,
-                       payment_info, datetime.now().isoformat()))
+            # Create withdrawal record with complete USDT and INR tracking
+            c.execute("""
+                INSERT INTO withdrawals (
+                    user_id, amount, fee, final_amount, method, payment_info,
+                    status, request_date, amount_usdt, inr_exchange_rate, inr_payout_amount
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (
+                uid, payout_amount, fee, final_amount, method, payment_info,
+                "pending", datetime.now().isoformat(), amount_usdt, rate,
+                payout_amount if method == 'upi' else None
+            ))
             wid = c.fetchone()['id']
 
     except Exception as e:
@@ -532,35 +578,33 @@ async def confirm_withdrawal(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     context.user_data.clear()
 
+    # Success message
+    payout_str = f"${float(final_amount):.2f} USDT"
     await q.edit_message_text(
-        f"✅ <b>Withdrawal Requested</b>\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"🆔 ID: <b>#{wid}</b>\n"
-        f"💰 Amount: <b>₹{float(amount):.2f}</b>\n"
-        f"📊 Fee: ₹{float(fee):.2f}\n"
-        f"💵 Final: <b>₹{float(final_amount):.2f}</b>\n"
-        f"💳 Method: {method_name}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"⏳ Processing within <b>24-48 hours</b>",
+        f"✅ <b>Withdrawal Requested!</b>\n\n"
+        f"Request ID: <b>#{wid}</b>\n"
+        f"Method: <b>{method_name}</b>\n"
+        f"Amount Deducted: <b>${float(amount_usdt):.2f} USDT</b>\n"
+        f"Payout Amount: <b>{payout_str}</b>\n"
+        f"Destination: <code>{payment_info}</code>\n\n"
+        f"⏳ Processing time: <b>1-24 hours</b>\n"
+        f"You will receive a notification once processed.",
         parse_mode="HTML"
     )
 
     # Notify admin
     try:
-        await context.bot.send_message(
-            ADMIN_ID,
-            f"💸 <b>New Withdrawal Request</b>\n\n"
-            f"User: {q.from_user.first_name}\n"
-            f"ID: {uid}\n\n"
-            f"Amount: ₹{float(amount):.2f}\n"
-            f"Fee: ₹{float(fee):.2f}\n"
-            f"Final: ₹{float(final_amount):.2f}\n"
-            f"Method: {method_name}\n"
-            f"Payment: {payment_info}",
-            parse_mode="HTML"
+        admin_text = (
+            f"💸 <b>New Withdrawal Request #{wid}</b>\n\n"
+            f"User ID: <code>{uid}</code>\n"
+            f"Method: <b>{method_name}</b>\n"
+            f"Requested: <b>${float(amount_usdt):.2f} USDT</b>\n"
+            f"Payout: <b>{payout_str}</b>\n"
+            f"Destination: <code>{payment_info}</code>"
         )
+        await context.bot.send_message(ADMIN_ID, admin_text, parse_mode="HTML")
     except Exception as e:
-        logger.error(f"Failed to notify admin: {e}")
+        logger.error(f"Failed to notify admin of withdrawal #{wid}: {e}")
 
     return ConversationHandler.END
 

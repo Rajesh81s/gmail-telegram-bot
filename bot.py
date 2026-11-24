@@ -21,6 +21,7 @@ from config import (
     TASK_CONFIRM, BULK_TASK_QTY, BULK_TASK_CONFIRM,
     SINGLE_TASK_EXPIRY_MINUTES, BULK_TASK_EXPIRY_MINUTES,
     TOTP_SECRET, TOTP_BULK_SECRET, ADMIN_SET_VIDEO, WITHDRAW_REJECT_REASON,
+    ADMIN_SET_EXCHANGE_RATE,
 )
 
 
@@ -44,8 +45,9 @@ from handlers.submission import (
     handle_cancel_task_text,
     receive_bulk_qty,
     # 2FA handlers
-    receive_totp_secret, handle_totp_refresh, handle_totp_done,
+    receive_totp_secret, receive_totp_qr_image, handle_totp_refresh, handle_totp_done,
     handle_totp_refresh_text, handle_totp_done_text,
+    handle_how_to_create_account, handle_how_to_enable_2fa,
     receive_bulk_totp_secret, handle_bulk_totp_refresh,
     handle_bulk_totp_next, handle_bulk_totp_alldone,
 )
@@ -60,7 +62,7 @@ from handlers.admin import (
     admin_callback, start_wallet_operation,
     receive_user_search, receive_broadcast,
     receive_wallet_amount, receive_wallet_reason,
-    receive_new_price, receive_video_url,
+    receive_new_price, receive_new_exchange_rate, receive_video_url,
     receive_max_withdraw, receive_withdraw_reject_reason,
 )
 from database import get_db, init_db, close_pool
@@ -204,26 +206,13 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
             )
         return
 
-    # ── ACTIVE TASK: Video instruction ──
-    if text == '🎥 Video instruction':
-        from utils import get_instruction_video_url
-        video_url = get_instruction_video_url()
-        if video_url:
-            try:
-                await context.bot.send_video(chat_id, video_url)
-            except Exception:
-                try:
-                    await context.bot.send_message(
-                        chat_id, f"🎥 <b>Video instruction:</b>\n{video_url}",
-                        parse_mode="HTML"
-                    )
-                except Exception:
-                    pass
-        else:
-            await context.bot.send_message(
-                chat_id, "📹 No instruction video available yet.",
-                parse_mode="HTML"
-            )
+    # ── ACTIVE TASK: Tutorial / Help buttons ──
+    if text == '❓ How to create account':
+        await handle_how_to_create_account(update, context)
+        return
+
+    if text in ('⁉️ How to enable 2FA', '🎥 Video instruction'):
+        await handle_how_to_enable_2fa(update, context)
         return
 
     # ── ACTIVE TASK: Cancel Task ──
@@ -301,8 +290,8 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
                 f"⚠️ Could not load full stats. Please try again later.\n\n"
                 f"🔗 <b>Your Referral Link:</b>\n"
                 f"<code>{ref_link}</code>\n\n"
-                f"<i>Share this link to earn ₹10 per Gmail in the first month "
-                f"and ₹5 per Gmail from the second month onwards!</i>"
+                f"<i>Share this link to earn $0.030 USDT per Gmail in the first month "
+                f"and $0.015 USDT per Gmail from the second month onwards!</i>"
             )
         prev_msg_id = context.user_data.get('last_bot_msg')
         if prev_msg_id:
@@ -396,9 +385,9 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
             f"📜 <b>Terms &amp; Conditions</b>\n\n"
             f"1. Create accounts exactly as shown in tasks\n"
             f"2. No fake or stolen accounts\n"
-            f"3. Minimum withdrawal: ₹100\n"
+            f"3. Minimum withdrawal: $2.00 USDT (UPI) / $5.00 USDT (Crypto)\n"
             f"4. Maximum {MAX_WITHDRAWALS_PER_DAY} withdrawals/day\n"
-            f"5. Withdrawal fee: {WITHDRAWAL_FEE_PERCENT}% (min ₹{WITHDRAWAL_FEE_MIN})\n"
+            f"5. Withdrawal fee: {WITHDRAWAL_FEE_PERCENT}% (min ${float(WITHDRAWAL_FEE_MIN):.2f} USDT)\n"
             f"6. Processing time: 24-48 hours\n"
             f"7. Only {', '.join(ALLOWED_DOMAINS)} allowed\n"
             f"8. Referral rewards after first verified task\n"
@@ -931,6 +920,15 @@ def main():
     )
     app.add_handler(price_conv)
 
+    # ── Exchange rate setting conversation ──
+    exchange_rate_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_callback, pattern="^set_exchange_rate$")],
+        states={ADMIN_SET_EXCHANGE_RATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_new_exchange_rate)]},
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
+    )
+    app.add_handler(exchange_rate_conv)
+
     # ── Video instruction setting conversation ──
     video_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(admin_callback, pattern="^set_video$")],
@@ -1011,6 +1009,10 @@ def main():
                 MessageHandler(filters.Regex(r'^🔄 Refresh OTP$'), handle_totp_refresh_text),
                 MessageHandler(filters.Regex(r'^✅ Submit Task$'), handle_totp_done_text),
                 MessageHandler(filters.Regex(r'^❌ Cancel Task$'), handle_cancel_task_text),
+                MessageHandler(filters.Regex(r'^⁉️ How to enable 2FA$'), handle_how_to_enable_2fa),
+                MessageHandler(filters.Regex(r'^❓ How to create account$'), handle_how_to_create_account),
+                # Photo / Document QR screenshot handler
+                MessageHandler(filters.PHOTO | filters.Document.IMAGE, receive_totp_qr_image),
                 # Generic text handler (for secret key input)
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_totp_secret),
                 # Callback handlers (legacy inline buttons)

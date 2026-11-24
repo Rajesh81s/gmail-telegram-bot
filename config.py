@@ -24,15 +24,30 @@ PORT = int(os.getenv("PORT", 8443))
 # ==================== DOMAIN RULES ====================
 ALLOWED_DOMAINS = ["gmail.com"]
 
-# ==================== FINANCIALS ====================
-DEFAULT_GMAIL_RATE = Decimal("20")  # fallback if DB has no rate set
-REFERRAL_RATE_MONTH_1 = Decimal("10")
-REFERRAL_RATE_MONTH_2_PLUS = Decimal("5")
-WITHDRAWAL_FEE_PERCENT = Decimal("5")
-WITHDRAWAL_FEE_MIN = Decimal("5")
+# ==================== FINANCIALS (PURE USDT ENGINE) ====================
+DEFAULT_GMAIL_RATE_USDT = Decimal("0.30")  # Default per approved Gmail in USDT
+DEFAULT_GMAIL_RATE = DEFAULT_GMAIL_RATE_USDT  # Alias for backward compatibility
+DEFAULT_USDT_TO_INR_RATE = Decimal("90.00")  # Internal fallback if needed
+
+# Tiered referral commission in USDT
+REFERRAL_RATE_MONTH_1 = Decimal("0.030")      # 10% of $0.30
+REFERRAL_RATE_MONTH_2_PLUS = Decimal("0.015") # 5% of $0.30
+
+# Channel bonus in USDT
+CHANNEL_BONUS_USDT = Decimal("0.01")          # $0.01 USDT channel bonus
+
+# Withdrawal settings (in pure USDT)
+DEFAULT_MIN_WITHDRAW_USDT = Decimal("5.00")       # Minimum for direct USDT crypto ($5.00)
+DEFAULT_MIN_WITHDRAW_UPI_USDT = Decimal("2.00")   # Minimum for UPI ($2.00 USDT)
+DEFAULT_MAX_WITHDRAWAL = Decimal("50.00")         # Maximum per single withdrawal in USDT
+
+WITHDRAWAL_FEE_PERCENT = Decimal("5")             # 5% platform fee
+WITHDRAWAL_FEE_MIN_USDT = Decimal("0.20")         # Minimum fee ($0.20 USDT)
+WITHDRAWAL_FEE_MIN_INR = WITHDRAWAL_FEE_MIN_USDT  # Alias for backward compatibility
+WITHDRAWAL_FEE_MIN = WITHDRAWAL_FEE_MIN_USDT      # Fallback alias
+
 MAX_WITHDRAWALS_PER_DAY = 3
 MAX_PENDING_WITHDRAWALS = 2
-DEFAULT_MAX_WITHDRAWAL = Decimal("500")
 
 # ==================== RATE LIMITS ====================
 SUBMIT_COOLDOWN = 20  # seconds
@@ -85,7 +100,8 @@ TASK_STATUS_CONFIRMED = "confirmed"
     WITHDRAW_CONFIRM,     # User confirming withdrawal details
     ADMIN_SET_MAX_WITHDRAW,  # Admin setting max withdrawal limit
     WITHDRAW_REJECT_REASON,  # Admin inputting custom rejection reason
-) = range(22)
+    ADMIN_SET_EXCHANGE_RATE, # Admin setting USDT to INR exchange rate
+) = range(23)
 
 # ==================== STARTUP VALIDATION ====================
 if not BOT_TOKEN:

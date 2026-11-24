@@ -15,12 +15,15 @@ from config import (
     ADMIN_WITHDRAWALS_PER_PAGE, USER_SEARCH, BROADCAST_MSG,
     WALLET_AMOUNT, WALLET_REASON, ADMIN_SET_PRICE, ADMIN_SET_VIDEO,
     ADMIN_SET_MAX_WITHDRAW, WITHDRAW_REJECT_REASON,
+    ADMIN_SET_EXCHANGE_RATE,
     DISABLE_SMTP_CHECK, SMTP_PROXY,
 )
 from database import get_db
 from utils import (
-    validate_page, round_decimal, log_audit, notify_user,
+    validate_page, round_decimal, round_usdt, log_audit, notify_user,
     safe_edit_or_reply, mask_email, get_gmail_rate, set_gmail_rate,
+    get_gmail_rate_usdt, set_gmail_rate_usdt, get_usdt_to_inr_rate, set_usdt_to_inr_rate,
+    usdt_to_inr, inr_to_usdt, format_dual_currency,
     is_task_submission_enabled, set_task_submission,
     is_bulk_submission_enabled, set_bulk_submission,
     get_instruction_video_url, set_instruction_video_url,
@@ -70,16 +73,21 @@ async def process_referral_payout(c, referred_id, count, context=None, gmail_ids
         return  # All already paid
     
     actual_count = len(unpaid_ids)
-    total_payout = round_decimal(rate * actual_count)
+    total_payout = round_usdt(rate * actual_count, decimals=4)
     
     if total_payout > 0:
-        c.execute("UPDATE users SET balance=balance+%s WHERE user_id=%s", (total_payout, referrer_id))
+        c.execute("""
+            UPDATE users
+            SET balance_usdt = balance_usdt + %s,
+                balance = balance + %s
+            WHERE user_id = %s
+        """, (total_payout, total_payout, referrer_id))
         
         for gid in unpaid_ids:
             c.execute("""
-                INSERT INTO referral_payouts (referrer_id, referred_id, gmail_id, amount, date)
-                VALUES (%s, %s, %s, %s, %s)
-            """, (referrer_id, referred_id, gid, rate, datetime.now().isoformat()))
+                INSERT INTO referral_payouts (referrer_id, referred_id, gmail_id, amount, amount_usdt, date)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (referrer_id, referred_id, gid, rate, rate, datetime.now().isoformat()))
             
         c.execute("UPDATE referrals SET rewarded=1 WHERE referred_id=%s AND rewarded=0", (referred_id,))
         
@@ -91,7 +99,7 @@ async def process_referral_payout(c, referred_id, count, context=None, gmail_ids
                 await notify_user(context, referrer_id,
                     f"🎉 <b>Referral Commission!</b>\n\n"
                     f"<b>{rname}</b> had {actual_count} task(s) approved.\n"
-                    f"₹{float(total_payout):.2f} credited to your balance!")
+                    f"+<b>${float(total_payout):.3f} USDT</b> credited to your wallet!")
             except Exception:
                 pass
 
@@ -122,27 +130,309 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             c.execute("SELECT COUNT(*) FROM withdrawals WHERE status='pending'")
             pw = list(c.fetchone().values())[0]
 
+        rate = get_usdt_to_inr_rate()
+        task_rate = get_gmail_rate_usdt()
+
         text = (
-            f"🔐 <b>Admin Panel</b>\n\n"
+            f"🔐 <b>Admin Operations Console</b>\n\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"👥 Total Users: <b>{users}</b>\n"
-            f"📬 Pending Gmail: <b>{pg}</b>\n"
-            f"🔍 In Review: <b>{ir}</b>\n"
+            f"📬 Confirmed Ready for Delivery: <b>{pg}</b>\n"
+            f"🔍 In Review (Dispatched): <b>{ir}</b>\n"
             f"💸 Pending Withdrawals: <b>{pw}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"💵 Task Reward: <b>${float(task_rate):.2f} USDT</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━"
         )
 
         kb = [
-            [InlineKeyboardButton(f"📬 Gmail Queue ({pg})", callback_data="gmail_queue")],
-            [InlineKeyboardButton(f"🔍 In Review ({ir})", callback_data="in_review_queue")],
-            [InlineKeyboardButton("💸 Withdrawals", callback_data="withdrawal_queue")],
+            [InlineKeyboardButton(f"📦 Batch Delivery & Export ({pg})", callback_data="batch_export_menu")],
+            [InlineKeyboardButton(f"🔍 Active Batches / In Review ({ir})", callback_data="active_batches_menu")],
+            [InlineKeyboardButton(f"💸 Withdrawals Queue ({pw})", callback_data="withdrawal_queue")],
             [InlineKeyboardButton("👥 User Management", callback_data="user_mgmt")],
+            [InlineKeyboardButton("💱 Economics & Rates", callback_data="admin_economics")],
             [InlineKeyboardButton("📢 Broadcast", callback_data="broadcast")],
             [InlineKeyboardButton("📊 Statistics", callback_data="stats")],
             [InlineKeyboardButton("⚙️ Settings", callback_data="admin_settings")],
-            [InlineKeyboardButton("🔙 Back", callback_data="menu")],
+            [InlineKeyboardButton("🔙 Back to Bot", callback_data="menu")],
         ]
         await safe_edit_or_reply(q, text, InlineKeyboardMarkup(kb))
+
+    # ── BATCH EXPORT MENU ──
+    elif d == "batch_export_menu":
+        with get_db() as conn:
+            c = conn.cursor()
+            c.execute("""SELECT COUNT(*) FROM gmail g
+                         JOIN users u ON g.user_id = u.user_id
+                         WHERE g.status='pending'
+                         AND (g.task_status = 'confirmed' OR g.task_id IS NULL)""")
+            pg = list(c.fetchone().values())[0]
+
+        text = (
+            f"📦 <b>Batch Delivery & Export Hub</b>\n\n"
+            f"📬 Confirmed Accounts Ready: <b>{pg}</b>\n"
+            f"📄 Format: <code>email|password|totp_secret</code>\n\n"
+            f"Choose quantity to export and dispatch to buyer:"
+        )
+        kb = [
+            [
+                InlineKeyboardButton("📥 Export 25", callback_data="do_batch_export_25"),
+                InlineKeyboardButton("📥 Export 50", callback_data="do_batch_export_50"),
+            ],
+            [
+                InlineKeyboardButton("📥 Export 100", callback_data="do_batch_export_100"),
+                InlineKeyboardButton(f"📥 Export ALL ({pg})", callback_data="do_batch_export_all"),
+            ],
+            [InlineKeyboardButton("🔙 Back to Admin", callback_data="admin")],
+        ]
+        await safe_edit_or_reply(q, text, InlineKeyboardMarkup(kb))
+
+    # ── EXECUTE BATCH EXPORT ──
+    elif d.startswith("do_batch_export_"):
+        qty_str = d.replace("do_batch_export_", "")
+        with get_db() as conn:
+            c = conn.cursor()
+            limit_sql = "" if qty_str == "all" else f"LIMIT {int(qty_str)}"
+            c.execute(f"""
+                SELECT g.id, g.user_id, g.email, g.password, g.totp_secret, g.reward_usdt, g.reward
+                FROM gmail g
+                JOIN users u ON g.user_id = u.user_id
+                WHERE g.status='pending'
+                AND (g.task_status = 'confirmed' OR g.task_id IS NULL)
+                ORDER BY g.submit_date ASC
+                {limit_sql}
+            """)
+            rows = c.fetchall()
+
+            if not rows:
+                await q.answer("❌ No confirmed accounts ready to export!", show_alert=True)
+                return
+
+            batch_id = f"BATCH-{datetime.now().strftime('%m%d_%H%M%S')}"
+            account_ids = [r['id'] for r in rows]
+
+            c.execute("""
+                UPDATE gmail
+                SET status = 'in_review',
+                    delivery_batch_id = %s,
+                    dispatched_at = %s
+                WHERE id = ANY(%s)
+            """, (batch_id, datetime.now().isoformat(), account_ids))
+            conn.commit()
+
+        lines = []
+        for r in rows:
+            sec = r.get('totp_secret') or 'NO_2FA'
+            lines.append(f"{r['email']}|{r['password']}|{sec}")
+        content = "\n".join(lines)
+
+        import io
+        file_obj = io.BytesIO(content.encode('utf-8'))
+        file_obj.name = f"{batch_id}_{len(rows)}acc.txt"
+
+        await context.bot.send_document(
+            chat_id=q.message.chat_id,
+            document=file_obj,
+            caption=(
+                f"📦 <b>Batch Export Successful!</b>\n\n"
+                f"🆔 Batch ID: <code>{batch_id}</code>\n"
+                f"📧 Total Accounts: <b>{len(rows)}</b>\n"
+                f"📄 Format: <code>email|password|totp_secret</code>\n\n"
+                f"Status: Accounts moved to <b>In Review</b>.\n"
+                f"When verified by buyer, tap <b>Active Batches</b> to settle with 1-click!"
+            ),
+            parse_mode="HTML"
+        )
+        await q.answer(f"✅ {len(rows)} accounts exported to {batch_id}!", show_alert=True)
+
+    # ── ACTIVE BATCHES MENU ──
+    elif d == "active_batches_menu":
+        with get_db() as conn:
+            c = conn.cursor()
+            c.execute("""
+                SELECT delivery_batch_id, COUNT(id) as count, MIN(dispatched_at) as dispatched
+                FROM gmail
+                WHERE status = 'in_review' AND delivery_batch_id IS NOT NULL
+                GROUP BY delivery_batch_id
+                ORDER BY dispatched DESC
+                LIMIT 10
+            """)
+            batches = c.fetchall()
+
+            c.execute("SELECT COUNT(*) FROM gmail WHERE status='in_review'")
+            total_ir = list(c.fetchone().values())[0]
+
+        if total_ir == 0:
+            await safe_edit_or_reply(
+                q,
+                "✅ <b>No accounts currently in review!</b>\n\nAll batches are settled. 🎉",
+                InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Admin", callback_data="admin")]])
+            )
+            return
+
+        text = (
+            f"🔍 <b>Active Delivery Batches</b>\n\n"
+            f"Total In Review: <b>{total_ir}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+        )
+        kb = []
+        if batches:
+            for b in batches:
+                bid = b['delivery_batch_id']
+                cnt = b['count']
+                disp = b['dispatched'][:16].replace("T", " ") if b['dispatched'] else ""
+                text += f"📦 <code>{bid}</code> — <b>{cnt}</b> accounts ({disp})\n"
+                kb.append([
+                    InlineKeyboardButton(f"⚡ Settle Batch {bid} ({cnt})", callback_data=f"settle_batch_prompt_{bid}"),
+                ])
+        else:
+            text += "<i>No tagged batches. (Individual user review available below)</i>\n"
+
+        kb.append([InlineKeyboardButton("🔍 Per-User Detailed Review", callback_data="in_review_queue")])
+        kb.append([InlineKeyboardButton("🔙 Back to Admin", callback_data="admin")])
+        await safe_edit_or_reply(q, text, InlineKeyboardMarkup(kb))
+
+    # ── SETTLE BATCH PROMPT ──
+    elif d.startswith("settle_batch_prompt_"):
+        bid = d.replace("settle_batch_prompt_", "")
+        with get_db() as conn:
+            c = conn.cursor()
+            c.execute("SELECT COUNT(*) FROM gmail WHERE delivery_batch_id=%s AND status='in_review'", (bid,))
+            cnt = list(c.fetchone().values())[0]
+
+        text = (
+            f"⚡ <b>Settle Batch: <code>{bid}</code></b>\n\n"
+            f"Total Accounts: <b>{cnt}</b>\n\n"
+            f"Choose an action:\n"
+            f"• <b>Approve All</b>: Credits all users their USDT reward + referral bonus.\n"
+            f"• <b>Reject All</b>: Marks batch as rejected (invalid credentials)."
+        )
+        kb = [
+            [InlineKeyboardButton(f"✅ Approve All ({cnt})", callback_data=f"do_approve_batch_{bid}")],
+            [InlineKeyboardButton(f"❌ Reject All ({cnt})", callback_data=f"do_reject_batch_{bid}")],
+            [InlineKeyboardButton("🔙 Back to Batches", callback_data="active_batches_menu")],
+        ]
+        await safe_edit_or_reply(q, text, InlineKeyboardMarkup(kb))
+
+    # ── DO APPROVE BATCH ──
+    elif d.startswith("do_approve_batch_"):
+        bid = d.replace("do_approve_batch_", "")
+        with get_db() as conn:
+            c = conn.cursor()
+            c.execute("""
+                SELECT id, user_id, reward_usdt, reward
+                FROM gmail
+                WHERE delivery_batch_id=%s AND status='in_review'
+            """, (bid,))
+            rows = c.fetchall()
+
+            if not rows:
+                await q.answer("No accounts to approve in this batch.", show_alert=True)
+                return
+
+            c.execute("""
+                UPDATE gmail
+                SET status = 'approved',
+                    review_date = %s
+                WHERE delivery_batch_id=%s AND status='in_review'
+            """, (datetime.now().isoformat(), bid))
+
+            # Group rewards by user
+            user_rewards = {}
+            user_counts = {}
+            user_gids = {}
+            for r in rows:
+                uid = r['user_id']
+                rew = Decimal(str(r.get('reward_usdt') or r.get('reward') or "0.30"))
+                user_rewards[uid] = user_rewards.get(uid, Decimal("0")) + rew
+                user_counts[uid] = user_counts.get(uid, 0) + 1
+                if uid not in user_gids:
+                    user_gids[uid] = []
+                user_gids[uid].append(r['id'])
+
+            for uid, total_rew in user_rewards.items():
+                cnt = user_counts[uid]
+                c.execute("""
+                    UPDATE users
+                    SET balance_usdt = balance_usdt + %s,
+                        balance = balance + %s,
+                        approved_gmail = approved_gmail + %s
+                    WHERE user_id = %s
+                """, (total_rew, total_rew, cnt, uid))
+
+                asyncio.create_task(process_referral_payout(c, uid, cnt, context, gmail_ids=user_gids[uid]))
+
+                try:
+                    await notify_user(
+                        context, uid,
+                        f"🎉 <b>Tasks Approved!</b>\n\n"
+                        f"<b>{cnt}</b> account(s) from your submissions were verified!\n"
+                        f"<b>+${float(total_rew):.2f} USDT</b> credited to your wallet. 💰"
+                    )
+                except Exception:
+                    pass
+
+            conn.commit()
+
+        log_audit("approve_batch", ADMIN_ID, None, f"Batch {bid}: {len(rows)} accounts")
+        await q.answer(f"✅ Batch {bid} ({len(rows)} accounts) Approved!", show_alert=True)
+        q.data = "active_batches_menu"
+        await admin_callback(update, context)
+
+    # ── DO REJECT BATCH ──
+    elif d.startswith("do_reject_batch_"):
+        bid = d.replace("do_reject_batch_", "")
+        with get_db() as conn:
+            c = conn.cursor()
+            c.execute("""
+                UPDATE gmail
+                SET status = 'rejected',
+                    review_date = %s,
+                    rejection_reason = 'Invalid credentials or failed 2FA verification'
+                WHERE delivery_batch_id=%s AND status='in_review'
+                RETURNING id, user_id
+            """, (datetime.now().isoformat(), bid))
+            rejected_rows = c.fetchall()
+            conn.commit()
+
+        log_audit("reject_batch", ADMIN_ID, None, f"Batch {bid}: {len(rejected_rows)} accounts")
+        await q.answer(f"❌ Batch {bid} rejected.", show_alert=True)
+        q.data = "active_batches_menu"
+        await admin_callback(update, context)
+
+    # ── ADMIN ECONOMICS ──
+    elif d == "admin_economics":
+        task_rate = get_gmail_rate_usdt()
+        max_wd = get_max_withdrawal_amount()
+
+        text = (
+            f"💱 <b>Economics & Settings (USDT)</b>\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"💵 <b>Gmail Task Reward:</b> ${float(task_rate):.2f} USDT\n"
+            f"📱 <b>Min UPI Withdrawal:</b> $2.00 USDT\n"
+            f"💎 <b>Min USDT Withdrawal:</b> $5.00 USDT\n"
+            f"💸 <b>Max Withdrawal:</b> ${float(max_wd):.2f} USDT\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"Select a setting to modify:"
+        )
+        kb = [
+            [InlineKeyboardButton("💵 Change Task Reward (USDT)", callback_data="set_price")],
+            [InlineKeyboardButton("💸 Change Max Withdrawal (USDT)", callback_data="set_max_withdraw")],
+            [InlineKeyboardButton("🔙 Back to Admin", callback_data="admin")],
+        ]
+        await safe_edit_or_reply(q, text, InlineKeyboardMarkup(kb))
+
+    # ── SET EXCHANGE RATE (entry point) ──
+    elif d == "set_exchange_rate":
+        current_rate = float(get_usdt_to_inr_rate())
+        await safe_edit_or_reply(
+            q,
+            f"💱 <b>Set Exchange Rate</b>\n\n"
+            f"Current rate: <b>1 USDT = {current_rate:.2f}</b>\n\n"
+            f"Send the new rate (e.g. 90.00, 91.50):\n\n"
+            f"/cancel to abort",
+        )
+        return ADMIN_SET_EXCHANGE_RATE
 
     # ── GMAIL QUEUE — PENDING ONLY (10 users per page) ──
     elif d == "gmail_queue" or d.startswith("gmail_queue_"):
@@ -262,7 +552,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += (
                 f"{i}. <b>#{gid}</b> {badge}\n"
                 f"<code>{gmail['email']}|{gmail['password']}|{secret}</code>\n"
-                f"₹{float(gmail['reward']):.1f}\n\n"
+                f"${float(gmail['reward']):.2f} USDT\n\n"
             )
 
         kb = []
@@ -497,7 +787,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += (
                 f"{i}. <b>#{gid}</b> {badge}\n"
                 f"<code>{gmail['email']}|{gmail['password']}|{secret}</code>\n"
-                f"₹{float(gmail['reward']):.1f}\n\n"
+                f"${float(gmail['reward']):.2f} USDT\n\n"
             )
             row = [InlineKeyboardButton(f"✅ #{gid}", callback_data=f"approve_{gid}_{uid}_{page}_ir")]
             if not DISABLE_SMTP_CHECK or SMTP_PROXY:
@@ -608,20 +898,20 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 approval_count = list(c.fetchone().values())[0]
                 is_first = (approval_count == 1)
 
-                c.execute("UPDATE users SET balance=balance+%s, approved_gmail=approved_gmail+1 WHERE user_id=%s",
-                          (reward, uid))
+                c.execute("UPDATE users SET balance_usdt=balance_usdt+%s, balance=balance+%s, approved_gmail=approved_gmail+1 WHERE user_id=%s",
+                          (reward, reward, uid))
 
                 await process_referral_payout(c, uid, 1, context, [gid])
 
                 conn.commit()
-                log_audit("approve_gmail", ADMIN_ID, uid, f"#{gid} — ₹{float(reward):.2f}")
+                log_audit("approve_gmail", ADMIN_ID, uid, f"#{gid} — ${float(reward):.2f} USDT")
 
                 await notify_user(context, uid,
                     f"✅ <b>Gmail Verified!</b>\n\n"
                     f"📧 {email}\n"
-                    f"💰 ₹{float(reward):.2f} credited!")
+                    f"💰 ${float(reward):.2f} USDT credited!")
 
-                await q.answer(f"✅ Approved — ₹{float(reward):.2f}", show_alert=True)
+                await q.answer(f"✅ Approved — ${float(reward):.2f} USDT", show_alert=True)
                 # Navigate back to correct section
                 if from_ir:
                     q.data = f'review_detail_{uid}_{page}'
@@ -696,14 +986,14 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 total_reward = sum(round_decimal(g['reward']) for g in gmails)
                 count = len(gmails)
 
-                c.execute("UPDATE users SET balance=balance+%s, approved_gmail=approved_gmail+%s WHERE user_id=%s",
-                          (total_reward, count, uid))
+                c.execute("UPDATE users SET balance_usdt=balance_usdt+%s, balance=balance+%s, approved_gmail=approved_gmail+%s WHERE user_id=%s",
+                          (total_reward, total_reward, count, uid))
 
                 gmail_ids = [g['id'] for g in gmails]
                 await process_referral_payout(c, uid, count, context, gmail_ids)
 
                 conn.commit()
-                log_audit("approve_all_gmail", ADMIN_ID, uid, f"{count} — ₹{float(total_reward):.2f}")
+                log_audit("approve_all_gmail", ADMIN_ID, uid, f"{count} — ${float(total_reward):.2f} USDT")
 
                 email_list = "\n".join([f"• {mask_email(g['email'])}" for g in gmails[:5]])
                 if len(gmails) > 5:
@@ -712,12 +1002,12 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await notify_user(context, uid,
                     f"✅ <b>All Gmail Verified!</b>\n\n"
                     f"Total: {count} accounts\n"
-                    f"₹{float(total_reward):.2f} credited!\n\n{email_list}")
+                    f"${float(total_reward):.2f} USDT credited!\n\n{email_list}")
 
-                await q.answer(f"✅ {count} approved — ₹{float(total_reward):.2f}", show_alert=True)
+                await q.answer(f"✅ {count} approved — ${float(total_reward):.2f} USDT", show_alert=True)
 
                 await safe_edit_or_reply(q,
-                    f"✅ <b>Batch Approved</b>\n\nUser: {uid}\nCount: {count}\nTotal: ₹{float(total_reward):.2f}",
+                    f"✅ <b>Batch Approved</b>\n\nUser: {uid}\nCount: {count}\nTotal: ${float(total_reward):.2f} USDT",
                     InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Queue", callback_data="gmail_queue_0")]]))
 
         except Exception as e:
@@ -781,14 +1071,14 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 total_reward = sum(round_decimal(g['reward']) for g in gmails)
                 count = len(gmails)
 
-                c.execute("UPDATE users SET balance=balance+%s, approved_gmail=approved_gmail+%s WHERE user_id=%s",
-                          (total_reward, count, uid))
+                c.execute("UPDATE users SET balance_usdt=balance_usdt+%s, balance=balance+%s, approved_gmail=approved_gmail+%s WHERE user_id=%s",
+                          (total_reward, total_reward, count, uid))
 
                 gmail_ids = [g['id'] for g in gmails]
                 await process_referral_payout(c, uid, count, context, gmail_ids)
 
                 conn.commit()
-                log_audit("ir_approve_all", ADMIN_ID, uid, f"{count} — ₹{float(total_reward):.2f}")
+                log_audit("ir_approve_all", ADMIN_ID, uid, f"{count} — ${float(total_reward):.2f} USDT")
 
                 email_list = "\n".join([f"• {mask_email(g['email'])}" for g in gmails[:5]])
                 if len(gmails) > 5:
@@ -797,12 +1087,12 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await notify_user(context, uid,
                     f"✅ <b>All Gmail Verified!</b>\n\n"
                     f"Total: {count} accounts\n"
-                    f"₹{float(total_reward):.2f} credited!\n\n{email_list}")
+                    f"${float(total_reward):.2f} USDT credited!\n\n{email_list}")
 
-                await q.answer(f"✅ {count} approved — ₹{float(total_reward):.2f}", show_alert=True)
+                await q.answer(f"✅ {count} approved — ${float(total_reward):.2f} USDT", show_alert=True)
 
                 await safe_edit_or_reply(q,
-                    f"✅ <b>Batch Approved (Review)</b>\n\nUser: {uid}\nCount: {count}\nTotal: ₹{float(total_reward):.2f}",
+                    f"✅ <b>Batch Approved (Review)</b>\n\nUser: {uid}\nCount: {count}\nTotal: ${float(total_reward):.2f} USDT",
                     InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to In Review", callback_data="in_review_queue")]]))
 
         except Exception as e:
@@ -889,7 +1179,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text += (
                     f"{i}. <b>💸 Withdrawal #{w['id']}</b>\n"
                     f"👤 User: {w['first_name']} (@{w['username'] or 'N/A'}) [<code>{w['user_id']}</code>]\n"
-                    f"💰 Final: <b>₹{float(w['final_amount']):.2f}</b> (Amt: ₹{float(w['amount']):.2f} | Fee: ₹{float(w['fee']):.2f})\n"
+                    f"💰 Final: <b>${float(w['final_amount']):.2f} USDT</b> (Amt: ${float(w['amount']):.2f} | Fee: ${float(w['fee']):.2f})\n"
                     f"💳 {w['method'].upper()}: <code>{w['payment_info']}</code>\n"
                     f"📅 {w['request_date'][:16]}\n"
                     f"━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -931,8 +1221,8 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⚠️ <b>Confirm Approval</b>\n\n"
             f"Withdrawal #{wid}\n"
             f"User: {result['first_name']}\n"
-            f"Amount: ₹{float(result['amount']):.2f}\n"
-            f"Final: ₹{float(result['final_amount']):.2f}\n"
+            f"Amount: ${float(result['amount']):.2f} USDT\n"
+            f"Final: ${float(result['final_amount']):.2f} USDT\n"
             f"Method: {result['method'].upper()}\n"
             f"Payment: {result['payment_info']}\n\n"
             f"⚠️ <i>This cannot be undone.</i>"
@@ -966,13 +1256,13 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 uid = result['user_id']
                 conn.commit()
-                log_audit("approve_withdrawal", ADMIN_ID, uid, f"#{wid} — ₹{float(result['amount']):.2f}")
+                log_audit("approve_withdrawal", ADMIN_ID, uid, f"#{wid} — ${float(result['amount']):.2f} USDT")
 
                 await notify_user(context, uid,
                     f"✅ <b>Withdrawal Approved!</b>\n\n"
                     f"ID: #{wid}\n"
-                    f"Amount: ₹{float(result['amount']):.2f}\n"
-                    f"Final: ₹{float(result['final_amount']):.2f}\n\n"
+                    f"Amount: ${float(result['amount']):.2f} USDT\n"
+                    f"Final: ${float(result['final_amount']):.2f} USDT\n\n"
                     f"Payment processed. Check your account!")
 
                 await q.answer("✅ Approved", show_alert=True)
@@ -1080,12 +1370,12 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ Approved Gmail: <b>{approved}</b>\n"
             f"👥 Referrals: <b>{refs}</b>\n\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"💰 User Balance: <b>₹{total_bal:.2f}</b>\n"
-            f"📧 Gmail Paid: ₹{paid:.2f}\n"
-            f"👥 Referral Paid: ₹{ref_paid:.2f}\n"
-            f"📊 Total Paid: <b>₹{paid + ref_paid:.2f}</b>\n"
-            f"💸 Withdrawn: ₹{withdrawn:.2f}\n"
-            f"📊 Fees Collected: <b>₹{fees:.2f}</b>\n"
+            f"💰 User Balance: <b>${total_bal:.2f} USDT</b>\n"
+            f"📧 Gmail Paid: ${paid:.2f} USDT\n"
+            f"👥 Referral Paid: ${ref_paid:.2f} USDT\n"
+            f"📊 Total Paid: <b>${paid + ref_paid:.2f} USDT</b>\n"
+            f"💸 Withdrawn: ${withdrawn:.2f} USDT\n"
+            f"📊 Fees Collected: <b>${fees:.2f} USDT</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━"
         )
 
@@ -1110,8 +1400,8 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (
             f"⚙️ <b>Bot Settings</b>\n\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"💰 <b>Gmail Rate:</b> ₹{current_rate:.0f}/account\n"
-            f"💸 <b>Max Withdrawal:</b> ₹{max_withdraw:.0f}/request\n"
+            f"💰 <b>Gmail Rate:</b> ${current_rate:.2f} USDT/account\n"
+            f"💸 <b>Max Withdrawal:</b> ${max_withdraw:.2f} USDT/request\n"
             f"📋 <b>Task Submission:</b> {status_icon} {status_text}\n"
             f"📦 <b>Bulk Submission:</b> {bulk_icon} {bulk_text}\n"
             f"🎥 <b>Video Instruction:</b> {video_status}\n"
@@ -1120,8 +1410,8 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Toggle tasks to pause/resume submissions."
         )
         kb = [
-            [InlineKeyboardButton(f"💰 Change Price (₹{current_rate:.0f})", callback_data="set_price")],
-            [InlineKeyboardButton(f"💸 Max Withdrawal (₹{max_withdraw:.0f})", callback_data="set_max_withdraw")],
+            [InlineKeyboardButton(f"💰 Change Price (${current_rate:.2f})", callback_data="set_price")],
+            [InlineKeyboardButton(f"💸 Max Withdrawal (${max_withdraw:.2f})", callback_data="set_max_withdraw")],
             [InlineKeyboardButton(toggle_label, callback_data="toggle_tasks")],
             [InlineKeyboardButton(bulk_toggle_label, callback_data="toggle_bulk")],
             [InlineKeyboardButton("🎥 Set Video Instruction", callback_data="set_video")],
@@ -1179,13 +1469,13 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── SET PRICE (entry point) ──
     elif d == "set_price":
-        current_rate = float(get_gmail_rate())
+        current_rate = float(get_gmail_rate_usdt())
         await safe_edit_or_reply(
             q,
             f"💰 <b>Change Gmail Rate</b>\n\n"
-            f"Current rate: <b>₹{current_rate:.0f}</b>/account\n\n"
-            f"Send the new price (in ₹):\n\n"
-            f"<i>Examples: 15, 20, 25, 30, 50</i>\n\n"
+            f"Current rate: <b>${current_rate:.2f} USDT</b>/account\n\n"
+            f"Send the new price in USDT (e.g. 0.30, 0.40):\n\n"
+            f"<i>Examples: 0.20, 0.30, 0.50</i>\n\n"
             f"/cancel to abort",
         )
         return ADMIN_SET_PRICE
@@ -1196,9 +1486,9 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_edit_or_reply(
             q,
             f"💸 <b>Set Max Withdrawal</b>\n\n"
-            f"Current limit: <b>₹{current_max:.0f}</b>/request\n\n"
-            f"Send the new max amount (in ₹):\n\n"
-            f"<i>Examples: 200, 500, 1000</i>\n\n"
+            f"Current limit: <b>${current_max:.2f} USDT</b>/request\n\n"
+            f"Send the new max amount in USDT (e.g. 50, 100):\n\n"
+            f"<i>Examples: 25, 50, 100</i>\n\n"
             f"/cancel to abort",
         )
         return ADMIN_SET_MAX_WITHDRAW
@@ -1280,20 +1570,20 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                      datetime.now().isoformat()))
 
                 conn.commit()
-                log_audit(f"wallet_{action}", ADMIN_ID, uid, f"₹{float(amount):.2f} | {reason}")
+                log_audit(f"wallet_{action}", ADMIN_ID, uid, f"${float(amount):.2f} USDT | {reason}")
 
                 action_word = "added to" if action == "add" else "deducted from"
                 await notify_user(context, uid,
-                    f"💰 ₹{float(amount):.2f} {action_word} your wallet.\nReason: {reason}")
+                    f"💰 ${float(amount):.2f} USDT {action_word} your wallet.\nReason: {reason}")
 
                 await q.answer("✅ Done", show_alert=True)
                 await q.message.reply_text(
                     f"✅ <b>Balance Updated</b>\n\n"
                     f"User: {uid}\n"
                     f"Action: {action.upper()}\n"
-                    f"Amount: ₹{float(amount):.2f}\n"
-                    f"Before: ₹{float(balance_before):.2f}\n"
-                    f"After: ₹{final_balance:.2f}\n"
+                    f"Amount: ${float(amount):.2f} USDT\n"
+                    f"Before: ${float(balance_before):.2f} USDT\n"
+                    f"After: ${final_balance:.2f} USDT\n"
                     f"Reason: {reason}",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Admin", callback_data="admin")]]),
                     parse_mode="HTML"
@@ -1349,8 +1639,8 @@ async def start_wallet_operation(update: Update, context: ContextTypes.DEFAULT_T
     await q.message.reply_text(
         f"💰 <b>Balance {action_text}</b>\n\n"
         f"User: {result['first_name']} (ID: {uid})\n"
-        f"Current: ₹{float(result['balance']):.2f}\n\n"
-        f"Enter amount (₹):\n\n/cancel to abort",
+        f"Current: ${float(result['balance']):.2f} USDT\n\n"
+        f"Enter amount in USDT:\n\n/cancel to abort",
         parse_mode="HTML"
     )
     return WALLET_AMOUNT
@@ -1383,7 +1673,7 @@ async def receive_user_search(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"👤 Name: {result['first_name']}\n"
                 f"📱 Username: @{result['username'] or 'N/A'}\n"
                 f"📊 Status: {status}\n\n"
-                f"💰 Balance: ₹{float(result['balance']):.2f}\n"
+                f"💰 Balance: ${float(result['balance']):.2f} USDT\n"
                 f"📧 Gmail: {result['approved_gmail']}/{result['total_gmail']}\n"
                 f"📅 Joined: {joined_display}\n"
                 f"━━━━━━━━━━━━━━━━━━━━"
@@ -1482,7 +1772,7 @@ async def receive_wallet_amount(update: Update, context: ContextTypes.DEFAULT_TY
 
         if action == 'deduct' and amount > Decimal(str(current)):
             await update.message.reply_text(
-                f"❌ Cannot deduct ₹{float(amount):.2f} (balance: ₹{current:.2f})\n\n/cancel to abort",
+                f"❌ Cannot deduct ${float(amount):.2f} USDT (balance: ${current:.2f} USDT)\n\n/cancel to abort",
                 parse_mode="HTML"
             )
             return WALLET_AMOUNT
@@ -1490,7 +1780,7 @@ async def receive_wallet_amount(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data['wallet_amount'] = float(amount)
 
         await update.message.reply_text(
-            f"💰 <b>Amount: ₹{float(amount):.2f}</b>\n\nEnter reason (5+ chars):\n\n/cancel to abort",
+            f"💰 <b>Amount: ${float(amount):.2f} USDT</b>\n\nEnter reason (5+ chars):\n\n/cancel to abort",
             parse_mode="HTML"
         )
         return WALLET_REASON
@@ -1523,7 +1813,7 @@ async def receive_wallet_reason(update: Update, context: ContextTypes.DEFAULT_TY
         f"⚠️ <b>Confirm Balance Update</b>\n\n"
         f"User: {name} (ID: {uid})\n"
         f"Action: {action.upper()}\n"
-        f"Amount: ₹{amount:.2f}\n"
+        f"Amount: ${amount:.2f} USDT\n"
         f"Reason: {reason}\n\n"
         f"⚠️ <i>This cannot be undone.</i>"
     )
@@ -1538,58 +1828,94 @@ async def receive_wallet_reason(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def receive_new_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin sets a new fixed Gmail rate."""
+    """Admin sets a new fixed Gmail task reward in USDT."""
     try:
         new_price = Decimal(update.message.text.strip())
 
-        if new_price <= 0:
+        if new_price <= 0 or new_price > 10:
             await update.message.reply_text(
-                "❌ Price must be greater than 0.\n\n/cancel to abort", parse_mode="HTML")
+                "❌ Price must be between $0.05 and $10.00 USDT.\n\n/cancel to abort", parse_mode="HTML")
             return ADMIN_SET_PRICE
 
-        if new_price > 500:
+        if new_price.as_tuple().exponent < -4:
             await update.message.reply_text(
-                "❌ Price cannot exceed ₹500.\n\n/cancel to abort", parse_mode="HTML")
+                "❌ Max 4 decimal places.\n\n/cancel to abort", parse_mode="HTML")
             return ADMIN_SET_PRICE
 
-        if new_price.as_tuple().exponent < -2:
-            await update.message.reply_text(
-                "❌ Max 2 decimal places.\n\n/cancel to abort", parse_mode="HTML")
-            return ADMIN_SET_PRICE
+        old_rate = float(get_gmail_rate_usdt())
 
-        old_rate = float(get_gmail_rate())
-
-        if set_gmail_rate(new_price):
+        if set_gmail_rate_usdt(new_price):
             log_audit("change_gmail_rate", ADMIN_ID, None,
-                      f"₹{old_rate:.0f} → ₹{float(new_price):.0f}")
+                      f"${old_rate:.2f} → ${float(new_price):.2f} USDT")
 
-            kb = [[InlineKeyboardButton("⚙️ Settings", callback_data="admin_settings"),
+            kb = [[InlineKeyboardButton("💱 Economics", callback_data="admin_economics"),
                    InlineKeyboardButton("🔙 Admin", callback_data="admin")]]
             await update.message.reply_text(
                 f"✅ <b>Gmail Rate Updated!</b>\n\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"Old: ₹{old_rate:.0f}/account\n"
-                f"New: <b>₹{float(new_price):.0f}/account</b>\n"
+                f"Old: ${old_rate:.2f} USDT/account\n"
+                f"New: <b>${float(new_price):.2f} USDT/account</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"All new tasks will use the new rate.\n"
-                f"Existing pending tasks keep their original rate.",
+                f"All new tasks will use this reward rate.",
                 reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML"
             )
+            return ConversationHandler.END
         else:
             await update.message.reply_text(
                 "⚠️ Failed to update rate. Try again.", parse_mode="HTML")
-
-        return ConversationHandler.END
+            return ConversationHandler.END
 
     except (ValueError, InvalidOperation):
         await update.message.reply_text(
-            "❌ Invalid number. Enter a valid price.\n\n/cancel to abort",
+            "❌ Invalid number. Enter a valid price (e.g. 0.30).\n\n/cancel to abort",
             parse_mode="HTML")
         return ADMIN_SET_PRICE
     except Exception as e:
         logger.error(f"Error in receive_new_price: {e}")
         await update.message.reply_text("⚠️ Error occurred.", parse_mode="HTML")
         return ConversationHandler.END
+
+
+async def receive_new_exchange_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin sets a new USDT to INR exchange rate."""
+    try:
+        new_rate = Decimal(update.message.text.strip())
+
+        if new_rate < 50 or new_rate > 200:
+            await update.message.reply_text(
+                "❌ Exchange rate must be between 50 and 200 per USDT.\n\n/cancel to abort",
+                parse_mode="HTML"
+            )
+            return ADMIN_SET_EXCHANGE_RATE
+
+        old_rate = float(get_usdt_to_inr_rate())
+
+        if set_usdt_to_inr_rate(new_rate):
+            log_audit("change_exchange_rate", ADMIN_ID, None, f"{old_rate:.2f} → {float(new_rate):.2f}")
+            kb = [
+                [InlineKeyboardButton("💱 Economics", callback_data="admin_economics"),
+                 InlineKeyboardButton("🔙 Admin", callback_data="admin")]
+            ]
+            await update.message.reply_text(
+                f"✅ <b>Exchange Rate Updated!</b>\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"Old: 1 USDT = {old_rate:.2f}\n"
+                f"New: <b>1 USDT = {float(new_rate):.2f}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"All future conversions will use this rate.",
+                reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML"
+            )
+            return ConversationHandler.END
+        else:
+            await update.message.reply_text("⚠️ Failed to update rate. Try again.", parse_mode="HTML")
+            return ConversationHandler.END
+
+    except (ValueError, InvalidOperation):
+        await update.message.reply_text(
+            "❌ Invalid number. Enter a valid rate (e.g. 90.00).\n\n/cancel to abort",
+            parse_mode="HTML"
+        )
+        return ADMIN_SET_EXCHANGE_RATE
 
 
 async def receive_video_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1642,29 +1968,29 @@ async def receive_max_withdraw(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         new_limit = Decimal(update.message.text.strip())
 
-        if new_limit < 100:
+        if new_limit < 2:
             await update.message.reply_text(
-                "❌ Minimum limit is ₹100.\n\n/cancel to abort", parse_mode="HTML")
+                "❌ Minimum limit is $2.00 USDT.\n\n/cancel to abort", parse_mode="HTML")
             return ADMIN_SET_MAX_WITHDRAW
 
-        if new_limit > 50000:
+        if new_limit > 1000:
             await update.message.reply_text(
-                "❌ Maximum limit is ₹50,000.\n\n/cancel to abort", parse_mode="HTML")
+                "❌ Maximum limit is $1000.00 USDT.\n\n/cancel to abort", parse_mode="HTML")
             return ADMIN_SET_MAX_WITHDRAW
 
         old_limit = float(get_max_withdrawal_amount())
 
         if set_max_withdrawal_amount(new_limit):
             log_audit("change_max_withdrawal", ADMIN_ID, None,
-                      f"₹{old_limit:.0f} → ₹{float(new_limit):.0f}")
+                      f"${old_limit:.2f} → ${float(new_limit):.2f} USDT")
 
             kb = [[InlineKeyboardButton("⚙️ Settings", callback_data="admin_settings"),
                    InlineKeyboardButton("🔙 Admin", callback_data="admin")]]
             await update.message.reply_text(
                 f"✅ <b>Max Withdrawal Updated!</b>\n\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"Old: ₹{old_limit:.0f}/request\n"
-                f"New: <b>₹{float(new_limit):.0f}/request</b>\n"
+                f"Old: ${old_limit:.2f} USDT/request\n"
+                f"New: <b>${float(new_limit):.2f} USDT/request</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━",
                 reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML"
             )
@@ -1726,23 +2052,23 @@ async def receive_withdraw_reject_reason(update: Update, context: ContextTypes.D
                 return ConversationHandler.END
 
             uid, amount = result['user_id'], round_decimal(result['amount'])
-            c.execute("UPDATE users SET balance=balance+%s WHERE user_id=%s", (amount, uid))
+            c.execute("UPDATE users SET balance_usdt=balance_usdt+%s, balance=balance+%s WHERE user_id=%s", (amount, amount, uid))
             conn.commit()
 
-            log_audit("reject_withdrawal", ADMIN_ID, uid, f"#{wid} — ₹{float(amount):.2f} refunded — {rejection_reason}")
+            log_audit("reject_withdrawal", ADMIN_ID, uid, f"#{wid} — ${float(amount):.2f} USDT refunded — {rejection_reason}")
 
             # Notify the user with the custom reason / comments!
             await notify_user(context, uid,
                 f"❌ <b>Withdrawal Rejected</b>\n\n"
                 f"ID: #{wid}\n"
-                f"Amount: ₹{float(amount):.2f}\n"
+                f"Amount: ${float(amount):.2f} USDT\n"
                 f"<b>Reason:</b> {rejection_reason}\n\n"
-                f"₹{float(amount):.2f} refunded to your balance.")
+                f"${float(amount):.2f} USDT refunded to your balance.")
 
             await update.message.reply_text(
                 f"❌ <b>Withdrawal #{wid} Rejected & Refunded</b>\n\n"
                 f"User ID: {uid}\n"
-                f"Refunded: ₹{float(amount):.2f}\n"
+                f"Refunded: ${float(amount):.2f} USDT\n"
                 f"Reason: {rejection_reason}",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Withdrawals Queue", callback_data=f"withdrawal_queue_{page}")]])
             )
