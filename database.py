@@ -213,6 +213,9 @@ def init_db():
             ON CONFLICT (key) DO NOTHING
         ''')
 
+        # Commit all CREATE TABLE + system_flags before migrations
+        conn.commit()
+
         # ==================== MIGRATIONS ====================
         columns_to_add = [
             ("users", "notifications_enabled", "INTEGER DEFAULT 1"),
@@ -256,12 +259,14 @@ def init_db():
 
         for table, column, definition in columns_to_add:
             try:
+                c.execute("SAVEPOINT col_check")
                 c.execute(f"SELECT {column} FROM {table} LIMIT 1")
+                c.execute("RELEASE SAVEPOINT col_check")
             except psycopg2.Error:
-                conn.rollback()
+                c.execute("ROLLBACK TO SAVEPOINT col_check")
                 logger.info(f"Adding {column} column to {table} table")
                 c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-                conn.commit()
+        conn.commit()
 
         # ==================== INDEXES ====================
         indexes = [
