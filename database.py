@@ -258,14 +258,7 @@ def init_db():
         ]
 
         for table, column, definition in columns_to_add:
-            try:
-                c.execute("SAVEPOINT col_check")
-                c.execute(f"SELECT {column} FROM {table} LIMIT 1")
-                c.execute("RELEASE SAVEPOINT col_check")
-            except psycopg2.Error:
-                c.execute("ROLLBACK TO SAVEPOINT col_check")
-                logger.info(f"Adding {column} column to {table} table")
-                c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            c.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {definition}")
         conn.commit()
 
         # ==================== INDEXES ====================
