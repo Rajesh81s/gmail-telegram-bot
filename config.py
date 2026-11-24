@@ -102,7 +102,10 @@ TASK_STATUS_CONFIRMED = "confirmed"
     ADMIN_SET_MAX_WITHDRAW,  # Admin setting max withdrawal limit
     WITHDRAW_REJECT_REASON,  # Admin inputting custom rejection reason
     ADMIN_SET_EXCHANGE_RATE, # Admin setting USDT to INR exchange rate
-) = range(23)
+    ADMIN_SET_2FA_VIDEO,     # Admin setting 2FA instruction video
+    ADMIN_SET_MIN_WITHDRAW_UPI,   # Admin setting min UPI withdrawal
+    ADMIN_SET_MIN_WITHDRAW_USDT,  # Admin setting min USDT withdrawal
+) = range(26)
 
 # ==================== STARTUP VALIDATION ====================
 if not BOT_TOKEN:

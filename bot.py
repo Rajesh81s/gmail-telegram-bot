@@ -22,6 +22,8 @@ from config import (
     SINGLE_TASK_EXPIRY_MINUTES, BULK_TASK_EXPIRY_MINUTES,
     TOTP_SECRET, TOTP_BULK_SECRET, ADMIN_SET_VIDEO, WITHDRAW_REJECT_REASON,
     ADMIN_SET_EXCHANGE_RATE,
+    ADMIN_SET_2FA_VIDEO, ADMIN_SET_MIN_WITHDRAW_UPI, ADMIN_SET_MIN_WITHDRAW_USDT,
+    TELEGRAM_CHANNEL,
 )
 
 
@@ -64,6 +66,7 @@ from handlers.admin import (
     receive_wallet_amount, receive_wallet_reason,
     receive_new_price, receive_new_exchange_rate, receive_video_url,
     receive_max_withdraw, receive_withdraw_reject_reason,
+    receive_min_withdraw_upi, receive_min_withdraw_usdt, receive_2fa_video_url,
 )
 from database import get_db, init_db, close_pool
 from utils import ensure_user_exists, get_instruction_video_url, rate_limiter, update_last_activity
@@ -100,6 +103,30 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
 
     # Track activity
     update_last_activity(user_id)
+
+    # ── MANDATORY CHANNEL JOIN CHECK ──
+    # Allow only Back, Cancel, Help, Settings, and Admin through without channel join
+    bypass_buttons = {'🔙 Back', '❌ Cancel', '❓ Help', '⚙️ Settings',
+                      '🔔 Toggle Notifications', '📜 Terms & Conditions', '🔐 Admin Panel'}
+    if text not in bypass_buttons and user_id != ADMIN_ID:
+        try:
+            from utils import check_channel
+            is_member = await check_channel(user_id, context)
+            if not is_member:
+                channel_url = f"https://t.me/{TELEGRAM_CHANNEL.lstrip('@')}"
+                await context.bot.send_message(
+                    chat_id,
+                    f"⚠️ <b>Channel Membership Required</b>\n\n"
+                    f"You must join <b>{TELEGRAM_CHANNEL}</b> to use this bot.\n\n"
+                    f"👉 <a href=\"{channel_url}\">Join Channel</a>\n\n"
+                    f"After joining, try again.",
+                    parse_mode="HTML",
+                    reply_markup=get_main_reply_keyboard(user_id),
+                )
+                return
+        except Exception as e:
+            logger.error(f"Channel check error in text handler: {e}")
+            # Allow through on error to avoid blocking users
 
     # Delete user's keyboard text from chat (keeps it clean)
     try:
@@ -381,11 +408,14 @@ async def handle_text_messages(update: Update, context: ContextTypes.DEFAULT_TYP
     # ── SETTINGS SUB: Terms & Conditions ──
     if text == '📜 Terms & Conditions':
         from config import WITHDRAWAL_FEE_PERCENT, WITHDRAWAL_FEE_MIN, MAX_WITHDRAWALS_PER_DAY, ALLOWED_DOMAINS, SUPPORT_USERNAME
+        from utils import get_min_withdraw_upi, get_min_withdraw_usdt
+        min_upi = float(get_min_withdraw_upi())
+        min_usdt_val = float(get_min_withdraw_usdt())
         terms = (
             f"📜 <b>Terms &amp; Conditions</b>\n\n"
             f"1. Create accounts exactly as shown in tasks\n"
             f"2. No fake or stolen accounts\n"
-            f"3. Minimum withdrawal: $2.00 USDT (UPI) / $5.00 USDT (Crypto)\n"
+            f"3. Minimum withdrawal: ${min_upi:.2f} USDT (UPI) / ${min_usdt_val:.2f} USDT (Crypto)\n"
             f"4. Maximum {MAX_WITHDRAWALS_PER_DAY} withdrawals/day\n"
             f"5. Withdrawal fee: {WITHDRAWAL_FEE_PERCENT}% (min ${float(WITHDRAWAL_FEE_MIN):.2f} USDT)\n"
             f"6. Processing time: 24-48 hours\n"
@@ -743,6 +773,7 @@ def route_callback(data: str) -> str:
         "user_mgmt", "broadcast", "stats",
         "block_", "wallet_confirm_", "wallet_cancel",
         "admin_settings", "set_price", "set_max_withdraw", "toggle_tasks", "toggle_bulk", "set_video",
+        "set_2fa_video", "set_min_withdraw_upi", "set_min_withdraw_usdt", "set_exchange_rate",
     ]
     submission_prefixes = [
         "get_task", "task_done_", "task_skip_",
@@ -788,6 +819,19 @@ async def main_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if q.from_user:
         update_last_activity(q.from_user.id)
+
+    # ── MANDATORY CHANNEL JOIN CHECK (for non-admin, non-exempt callbacks) ──
+    bypass_callbacks = {'claim_channel', 'menu', 'settings', 'toggle_notif', 'view_terms', 'help'}
+    if q.from_user and q.from_user.id != ADMIN_ID and q.data not in bypass_callbacks:
+        try:
+            from utils import check_channel
+            is_member = await check_channel(q.from_user.id, context)
+            if not is_member:
+                channel_url = f"https://t.me/{TELEGRAM_CHANNEL.lstrip('@')}"
+                await q.answer(f"⚠️ Join {TELEGRAM_CHANNEL} first!", show_alert=True)
+                return
+        except Exception as e:
+            logger.error(f"Channel check error in callback: {e}")
 
     route = route_callback(q.data)
 
@@ -949,6 +993,36 @@ def main():
         allow_reentry=True,
     )
     app.add_handler(max_withdraw_conv)
+
+    # ── Min withdrawal UPI setting conversation ──
+    min_upi_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_callback, pattern="^set_min_withdraw_upi$")],
+        states={ADMIN_SET_MIN_WITHDRAW_UPI: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_min_withdraw_upi)]},
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
+    )
+    app.add_handler(min_upi_conv)
+
+    # ── Min withdrawal USDT setting conversation ──
+    min_usdt_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_callback, pattern="^set_min_withdraw_usdt$")],
+        states={ADMIN_SET_MIN_WITHDRAW_USDT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_min_withdraw_usdt)]},
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
+    )
+    app.add_handler(min_usdt_conv)
+
+    # ── 2FA Video instruction setting conversation ──
+    video_2fa_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_callback, pattern="^set_2fa_video$")],
+        states={ADMIN_SET_2FA_VIDEO: [
+            MessageHandler(filters.VIDEO & ~filters.COMMAND, receive_2fa_video_url),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, receive_2fa_video_url),
+        ]},
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
+    )
+    app.add_handler(video_2fa_conv)
 
     # ── Withdrawal rejection comment conversation ──
     reject_conv = ConversationHandler(

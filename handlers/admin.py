@@ -16,6 +16,7 @@ from config import (
     WALLET_AMOUNT, WALLET_REASON, ADMIN_SET_PRICE, ADMIN_SET_VIDEO,
     ADMIN_SET_MAX_WITHDRAW, WITHDRAW_REJECT_REASON,
     ADMIN_SET_EXCHANGE_RATE,
+    ADMIN_SET_2FA_VIDEO, ADMIN_SET_MIN_WITHDRAW_UPI, ADMIN_SET_MIN_WITHDRAW_USDT,
     DISABLE_SMTP_CHECK, SMTP_PROXY,
 )
 from database import get_db
@@ -28,6 +29,9 @@ from utils import (
     is_bulk_submission_enabled, set_bulk_submission,
     get_instruction_video_url, set_instruction_video_url,
     get_max_withdrawal_amount, set_max_withdrawal_amount,
+    get_min_withdraw_upi, set_min_withdraw_upi,
+    get_min_withdraw_usdt, set_min_withdraw_usdt,
+    get_2fa_video_url, set_2fa_video_url,
 )
 
 logger = logging.getLogger(__name__)
@@ -1388,7 +1392,10 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tasks_enabled = is_task_submission_enabled()
         bulk_enabled = is_bulk_submission_enabled()
         video_url = get_instruction_video_url()
+        video_2fa_url = get_2fa_video_url()
         max_withdraw = float(get_max_withdrawal_amount())
+        min_upi = float(get_min_withdraw_upi())
+        min_usdt = float(get_min_withdraw_usdt())
         status_icon = "✅" if tasks_enabled else "🔴"
         status_text = "Active" if tasks_enabled else "Paused"
         toggle_label = "🔴 Disable Task Submission" if tasks_enabled else "🟢 Enable Task Submission"
@@ -1396,15 +1403,19 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bulk_text = "Active" if bulk_enabled else "Disabled"
         bulk_toggle_label = "🔴 Disable Bulk Tasks" if bulk_enabled else "🟢 Enable Bulk Tasks"
         video_status = "✅ Set" if video_url else "❌ Not set"
+        video_2fa_status = "✅ Set" if video_2fa_url else "❌ Not set"
 
         text = (
             f"⚙️ <b>Bot Settings</b>\n\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"💰 <b>Gmail Rate:</b> ${current_rate:.2f} USDT/account\n"
             f"💸 <b>Max Withdrawal:</b> ${max_withdraw:.2f} USDT/request\n"
+            f"📱 <b>Min Withdraw UPI:</b> ${min_upi:.2f} USDT\n"
+            f"💎 <b>Min Withdraw USDT:</b> ${min_usdt:.2f} USDT\n"
             f"📋 <b>Task Submission:</b> {status_icon} {status_text}\n"
             f"📦 <b>Bulk Submission:</b> {bulk_icon} {bulk_text}\n"
-            f"🎥 <b>Video Instruction:</b> {video_status}\n"
+            f"🎥 <b>Account Video:</b> {video_status}\n"
+            f"🔐 <b>2FA Video:</b> {video_2fa_status}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
             f"Rate applies to <b>all users</b>.\n"
             f"Toggle tasks to pause/resume submissions."
@@ -1412,9 +1423,12 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = [
             [InlineKeyboardButton(f"💰 Change Price (${current_rate:.2f})", callback_data="set_price")],
             [InlineKeyboardButton(f"💸 Max Withdrawal (${max_withdraw:.2f})", callback_data="set_max_withdraw")],
+            [InlineKeyboardButton(f"📱 Min UPI (${min_upi:.2f})", callback_data="set_min_withdraw_upi"),
+             InlineKeyboardButton(f"💎 Min USDT (${min_usdt:.2f})", callback_data="set_min_withdraw_usdt")],
             [InlineKeyboardButton(toggle_label, callback_data="toggle_tasks")],
             [InlineKeyboardButton(bulk_toggle_label, callback_data="toggle_bulk")],
-            [InlineKeyboardButton("🎥 Set Video Instruction", callback_data="set_video")],
+            [InlineKeyboardButton("🎥 Set Account Video", callback_data="set_video"),
+             InlineKeyboardButton("🔐 Set 2FA Video", callback_data="set_2fa_video")],
             [InlineKeyboardButton("🔙 Back", callback_data="admin")],
         ]
         await safe_edit_or_reply(q, text, InlineKeyboardMarkup(kb))
@@ -1492,6 +1506,46 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"/cancel to abort",
         )
         return ADMIN_SET_MAX_WITHDRAW
+
+    # ── SET MIN WITHDRAWAL UPI (entry point) ──
+    elif d == "set_min_withdraw_upi":
+        current_min = float(get_min_withdraw_upi())
+        await safe_edit_or_reply(
+            q,
+            f"📱 <b>Set Min UPI Withdrawal</b>\n\n"
+            f"Current minimum: <b>${current_min:.2f} USDT</b>\n\n"
+            f"Send the new minimum in USDT (e.g. 0.10, 0.50, 2.00):\n\n"
+            f"<i>Range: $0.10 — $100.00</i>\n\n"
+            f"/cancel to abort",
+        )
+        return ADMIN_SET_MIN_WITHDRAW_UPI
+
+    # ── SET MIN WITHDRAWAL USDT (entry point) ──
+    elif d == "set_min_withdraw_usdt":
+        current_min = float(get_min_withdraw_usdt())
+        await safe_edit_or_reply(
+            q,
+            f"💎 <b>Set Min USDT Withdrawal</b>\n\n"
+            f"Current minimum: <b>${current_min:.2f} USDT</b>\n\n"
+            f"Send the new minimum in USDT (e.g. 0.50, 2.00, 5.00):\n\n"
+            f"<i>Range: $0.10 — $100.00</i>\n\n"
+            f"/cancel to abort",
+        )
+        return ADMIN_SET_MIN_WITHDRAW_USDT
+
+    # ── SET 2FA VIDEO (entry point) ──
+    elif d == "set_2fa_video":
+        current_url = get_2fa_video_url()
+        current_display = f"Current: {current_url[:50]}..." if current_url and len(current_url) > 50 else (f"Current: {current_url}" if current_url else "No video set")
+        await safe_edit_or_reply(
+            q,
+            f"🔐 <b>Set 2FA Video Instruction</b>\n\n"
+            f"{current_display}\n\n"
+            f"Send the video URL or forward a video message.\n"
+            f"Supported: Telegram file_id, direct URL, or YouTube link.\n\n"
+            f"/cancel to abort",
+        )
+        return ADMIN_SET_2FA_VIDEO
 
     # ── BLOCK / UNBLOCK ──
     elif d.startswith("block_"):
@@ -1968,9 +2022,9 @@ async def receive_max_withdraw(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         new_limit = Decimal(update.message.text.strip())
 
-        if new_limit < 2:
+        if new_limit < Decimal("0.10"):
             await update.message.reply_text(
-                "❌ Minimum limit is $2.00 USDT.\n\n/cancel to abort", parse_mode="HTML")
+                "❌ Minimum limit is $0.10 USDT.\n\n/cancel to abort", parse_mode="HTML")
             return ADMIN_SET_MAX_WITHDRAW
 
         if new_limit > 1000:
@@ -2079,3 +2133,143 @@ async def receive_withdraw_reject_reason(update: Update, context: ContextTypes.D
         await update.message.reply_text("⚠️ Error occurred during rejection.")
         context.user_data.clear()
         return ConversationHandler.END
+
+
+
+async def receive_min_withdraw_upi(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin sets a new min UPI withdrawal amount."""
+    try:
+        new_min = Decimal(update.message.text.strip())
+
+        if new_min < Decimal("0.10"):
+            await update.message.reply_text(
+                "❌ Minimum is $0.10 USDT.\n\n/cancel to abort", parse_mode="HTML")
+            return ADMIN_SET_MIN_WITHDRAW_UPI
+
+        if new_min > Decimal("100"):
+            await update.message.reply_text(
+                "❌ Maximum is $100.00 USDT.\n\n/cancel to abort", parse_mode="HTML")
+            return ADMIN_SET_MIN_WITHDRAW_UPI
+
+        old_min = float(get_min_withdraw_upi())
+
+        if set_min_withdraw_upi(new_min):
+            log_audit("change_min_withdraw_upi", ADMIN_ID, None,
+                      f"${old_min:.2f} → ${float(new_min):.2f} USDT")
+
+            kb = [[InlineKeyboardButton("⚙️ Settings", callback_data="admin_settings"),
+                   InlineKeyboardButton("🔙 Admin", callback_data="admin")]]
+            await update.message.reply_text(
+                f"✅ <b>Min UPI Withdrawal Updated!</b>\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"Old: ${old_min:.2f} USDT\n"
+                f"New: <b>${float(new_min):.2f} USDT</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━",
+                reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML"
+            )
+        else:
+            await update.message.reply_text(
+                "⚠️ Failed to update. Try again.", parse_mode="HTML")
+
+        return ConversationHandler.END
+
+    except (ValueError, InvalidOperation):
+        await update.message.reply_text(
+            "❌ Invalid number. Enter a valid amount (e.g. 0.50).\n\n/cancel to abort",
+            parse_mode="HTML")
+        return ADMIN_SET_MIN_WITHDRAW_UPI
+    except Exception as e:
+        logger.error(f"Error in receive_min_withdraw_upi: {e}")
+        await update.message.reply_text("⚠️ Error occurred.", parse_mode="HTML")
+        return ConversationHandler.END
+
+
+async def receive_min_withdraw_usdt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin sets a new min USDT withdrawal amount."""
+    try:
+        new_min = Decimal(update.message.text.strip())
+
+        if new_min < Decimal("0.10"):
+            await update.message.reply_text(
+                "❌ Minimum is $0.10 USDT.\n\n/cancel to abort", parse_mode="HTML")
+            return ADMIN_SET_MIN_WITHDRAW_USDT
+
+        if new_min > Decimal("100"):
+            await update.message.reply_text(
+                "❌ Maximum is $100.00 USDT.\n\n/cancel to abort", parse_mode="HTML")
+            return ADMIN_SET_MIN_WITHDRAW_USDT
+
+        old_min = float(get_min_withdraw_usdt())
+
+        if set_min_withdraw_usdt(new_min):
+            log_audit("change_min_withdraw_usdt", ADMIN_ID, None,
+                      f"${old_min:.2f} → ${float(new_min):.2f} USDT")
+
+            kb = [[InlineKeyboardButton("⚙️ Settings", callback_data="admin_settings"),
+                   InlineKeyboardButton("🔙 Admin", callback_data="admin")]]
+            await update.message.reply_text(
+                f"✅ <b>Min USDT Withdrawal Updated!</b>\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"Old: ${old_min:.2f} USDT\n"
+                f"New: <b>${float(new_min):.2f} USDT</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━",
+                reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML"
+            )
+        else:
+            await update.message.reply_text(
+                "⚠️ Failed to update. Try again.", parse_mode="HTML")
+
+        return ConversationHandler.END
+
+    except (ValueError, InvalidOperation):
+        await update.message.reply_text(
+            "❌ Invalid number. Enter a valid amount (e.g. 2.00).\n\n/cancel to abort",
+            parse_mode="HTML")
+        return ADMIN_SET_MIN_WITHDRAW_USDT
+    except Exception as e:
+        logger.error(f"Error in receive_min_withdraw_usdt: {e}")
+        await update.message.reply_text("⚠️ Error occurred.", parse_mode="HTML")
+        return ConversationHandler.END
+
+
+async def receive_2fa_video_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin sends a video or URL for 2FA instruction."""
+    if update.message.video:
+        file_id = update.message.video.file_id
+        if set_2fa_video_url(file_id):
+            log_audit("set_2fa_video", ADMIN_ID, None, f"Video file_id: {file_id[:20]}...")
+            kb = [[InlineKeyboardButton("⚙️ Settings", callback_data="admin_settings"),
+                   InlineKeyboardButton("🔙 Admin", callback_data="admin")]]
+            await update.message.reply_text(
+                "✅ <b>2FA Video Instruction Updated!</b>\n\n"
+                "Users will now see this video when they tap \"How to enable 2FA\".",
+                reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML"
+            )
+            return ConversationHandler.END
+        else:
+            await update.message.reply_text("⚠️ Failed to save video. Try again.", parse_mode="HTML")
+            return ADMIN_SET_2FA_VIDEO
+
+    text = update.message.text.strip() if update.message.text else ""
+
+    if not text:
+        await update.message.reply_text(
+            "❌ Please send a video file or a URL.\n\n/cancel to abort",
+            parse_mode="HTML"
+        )
+        return ADMIN_SET_2FA_VIDEO
+
+    if set_2fa_video_url(text):
+        log_audit("set_2fa_video", ADMIN_ID, None, f"URL: {text[:50]}")
+        kb = [[InlineKeyboardButton("⚙️ Settings", callback_data="admin_settings"),
+               InlineKeyboardButton("🔙 Admin", callback_data="admin")]]
+        await update.message.reply_text(
+            f"✅ <b>2FA Video Instruction Updated!</b>\n\n"
+            f"URL: {text[:60]}{'...' if len(text) > 60 else ''}\n\n"
+            f"Users will now see this when they tap \"How to enable 2FA\".",
+            reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML"
+        )
+        return ConversationHandler.END
+    else:
+        await update.message.reply_text("⚠️ Failed to save. Try again.\n\n/cancel to abort", parse_mode="HTML")
+        return ADMIN_SET_2FA_VIDEO

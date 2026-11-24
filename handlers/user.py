@@ -5,6 +5,7 @@ EarnX Gmail Bot — User Handlers
 
 import logging
 import psycopg2
+from decimal import Decimal
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import ContextTypes, ConversationHandler
@@ -226,7 +227,10 @@ def build_profile_content(user_id):
 
 def build_help_content():
     """Build help page content."""
+    from utils import get_min_withdraw_upi, get_min_withdraw_usdt
     rate = float(calc_rate())
+    min_upi = float(get_min_withdraw_upi())
+    min_usdt = float(get_min_withdraw_usdt())
     text = (
         f"❓ <b>Help &amp; Support — EarnX Bot</b>\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -235,7 +239,7 @@ def build_help_content():
         f"2️⃣ Create the Gmail account <b>exactly</b> as shown\n"
         f"3️⃣ Tap <b>\"Done\"</b> — submission goes under review\n"
         f"4️⃣ Approved = reward credited!\n"
-        f"5️⃣ Withdraw once balance hits $2.00 USDT\n\n"
+        f"5️⃣ Withdraw once balance hits ${min_upi:.2f} USDT\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📦 <b>Task Types</b>\n"
         f"• <b>Single Task</b> — one account at a time\n"
@@ -249,7 +253,7 @@ def build_help_content():
         f"• Referral: <b>$0.030 USDT</b> (Month 1) / <b>$0.015 USDT</b> (Lifetime)\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"💸 <b>Withdrawals</b>\n"
-        f"• Minimum: $2.00 USDT (UPI) / $5.00 USDT (Crypto)\n"
+        f"• Minimum: ${min_upi:.2f} USDT (UPI) / ${min_usdt:.2f} USDT (Crypto)\n"
         f"• Fee: {WITHDRAWAL_FEE_PERCENT}% (min ${float(WITHDRAWAL_FEE_MIN):.2f} USDT)\n"
         f"• Limit: {MAX_WITHDRAWALS_PER_DAY}/day\n"
         f"• Methods: UPI &amp; USDT (BEP20)\n\n"
@@ -717,11 +721,14 @@ async def user_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── VIEW TERMS ──
     elif d == "view_terms":
+        from utils import get_min_withdraw_upi, get_min_withdraw_usdt
+        min_upi = float(get_min_withdraw_upi())
+        min_usdt_val = float(get_min_withdraw_usdt())
         text = (
             f"📜 <b>Terms &amp; Conditions</b>\n\n"
             f"1. Create accounts exactly as shown in tasks\n"
             f"2. No fake or stolen accounts\n"
-            f"3. Minimum withdrawal: $2.00 USDT (UPI) / $5.00 USDT (Crypto)\n"
+            f"3. Minimum withdrawal: ${min_upi:.2f} USDT (UPI) / ${min_usdt_val:.2f} USDT (Crypto)\n"
             f"4. Maximum {MAX_WITHDRAWALS_PER_DAY} withdrawals/day\n"
             f"5. Withdrawal fee: {WITHDRAWAL_FEE_PERCENT}% (min ${float(WITHDRAWAL_FEE_MIN):.2f} USDT)\n"
             f"6. Processing time: 24-48 hours\n"

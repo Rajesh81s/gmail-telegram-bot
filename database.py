@@ -209,7 +209,8 @@ def init_db():
             ('max_withdrawal_amount', '50'),
             ('task_submission_enabled', 'true'),
             ('bulk_submission_enabled', 'false'),
-            ('instruction_video_url', '')
+            ('instruction_video_url', ''),
+            ('instruction_video_2fa_url', '')
             ON CONFLICT (key) DO NOTHING
         ''')
 

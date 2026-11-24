@@ -864,6 +864,9 @@ async def handle_how_to_create_account(update: Update, context: ContextTypes.DEF
 async def handle_how_to_enable_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show instructions for enabling 2FA."""
     chat_id = update.effective_chat.id
+    from utils import get_2fa_video_url
+    video_2fa_url = get_2fa_video_url()
+
     text = (
         "🔐 <b>How to Enable 2FA (Authenticator)</b>\n\n"
         "1️⃣ In your created Google Account, go to <b>Security</b>.\n"
@@ -873,6 +876,8 @@ async def handle_how_to_enable_2fa(update: Update, context: ContextTypes.DEFAULT
         "5️⃣ Take a <b>screenshot of the QR code</b> and send the image directly here!\n"
         "6️⃣ The bot will instantly give you the 6-digit OTP code to enter in Google to finish activation."
     )
+    if video_2fa_url:
+        text += f"\n\n🎥 <b>Video Tutorial:</b> {video_2fa_url}"
     await context.bot.send_message(chat_id, text, parse_mode="HTML")
 
 

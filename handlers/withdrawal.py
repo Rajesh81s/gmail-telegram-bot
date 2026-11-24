@@ -12,7 +12,6 @@ from telegram.ext import ContextTypes, ConversationHandler
 from config import (
     ADMIN_ID, WITHDRAWAL_FEE_PERCENT, WITHDRAWAL_FEE_MIN,
     WITHDRAWAL_FEE_MIN_USDT, WITHDRAWAL_FEE_MIN_INR,
-    DEFAULT_MIN_WITHDRAW_USDT, DEFAULT_MIN_WITHDRAW_UPI_USDT,
     MAX_WITHDRAWALS_PER_DAY, MAX_PENDING_WITHDRAWALS,
     WITHDRAW_AMT, WITHDRAW_CONFIRM, UPI_ID, USDT_ADDRESS,
 )
@@ -23,6 +22,7 @@ from utils import (
     get_usdt_to_inr_rate, inr_to_usdt, usdt_to_inr,
     format_dual_currency, safe_edit_or_reply,
     is_blocked, notify_user, get_max_withdrawal_amount,
+    get_min_withdraw_upi, get_min_withdraw_usdt,
 )
 
 logger = logging.getLogger(__name__)
@@ -70,11 +70,11 @@ async def handle_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"⚠️ {pending_count} pending requests. Please wait for processing."
             )
             kb = [[InlineKeyboardButton("🔙 Back", callback_data="menu")]]
-        elif bal_usdt < DEFAULT_MIN_WITHDRAW_UPI_USDT:
+        elif bal_usdt < get_min_withdraw_upi():
             text = (
                 f"💸 <b>Withdraw Funds</b>\n\n"
                 f"💰 Balance: <b>{format_dual_currency(bal_usdt, rate=rate)}</b>\n\n"
-                f"⚠️ Minimum withdrawal: <b>${float(DEFAULT_MIN_WITHDRAW_UPI_USDT):.2f} USDT</b> (via UPI) or <b>${float(DEFAULT_MIN_WITHDRAW_USDT):.2f} USDT</b> (via Crypto)\n"
+                f"⚠️ Minimum withdrawal: <b>${float(get_min_withdraw_upi()):.2f} USDT</b> (via UPI) or <b>${float(get_min_withdraw_usdt()):.2f} USDT</b> (via Crypto)\n"
                 f"Keep submitting tasks to reach the threshold!"
             )
             kb = [[InlineKeyboardButton("🔙 Back", callback_data="menu")]]
@@ -86,8 +86,8 @@ async def handle_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📊 Today: <b>{remaining}/{MAX_WITHDRAWALS_PER_DAY}</b> remaining\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n\n"
                 f"💡 <b>Available Methods:</b>\n"
-                f"📱 <b>UPI:</b> Min ${float(DEFAULT_MIN_WITHDRAW_UPI_USDT):.2f} USDT (Fee: 5%, min ${float(WITHDRAWAL_FEE_MIN_USDT):.2f} USDT)\n"
-                f"💎 <b>USDT (BEP20):</b> Min ${float(DEFAULT_MIN_WITHDRAW_USDT):.2f} USDT (Fee: 5%, min ${float(WITHDRAWAL_FEE_MIN_USDT):.2f} USDT)\n\n"
+                f"📱 <b>UPI:</b> Min ${float(get_min_withdraw_upi()):.2f} USDT (Fee: 5%, min ${float(WITHDRAWAL_FEE_MIN_USDT):.2f} USDT)\n"
+                f"💎 <b>USDT (BEP20):</b> Min ${float(get_min_withdraw_usdt()):.2f} USDT (Fee: 5%, min ${float(WITHDRAWAL_FEE_MIN_USDT):.2f} USDT)\n\n"
                 f"Choose withdrawal method:"
             )
             kb = [
@@ -126,7 +126,7 @@ async def handle_withdraw_method(update: Update, context: ContextTypes.DEFAULT_T
         await safe_edit_or_reply(
             q,
             f"💸 <b>Withdraw via UPI</b>\n\n"
-            f"Enter amount in <b>USDT</b> (Minimum ${float(DEFAULT_MIN_WITHDRAW_UPI_USDT):.2f} USDT):\n\n"
+            f"Enter amount in <b>USDT</b> (Minimum ${float(get_min_withdraw_upi()):.2f} USDT):\n\n"
             f"/cancel to abort",
         )
         return WITHDRAW_AMT
@@ -143,7 +143,7 @@ async def handle_withdraw_method(update: Update, context: ContextTypes.DEFAULT_T
         await safe_edit_or_reply(
             q,
             f"💸 <b>Withdraw via USDT (BEP20)</b>\n\n"
-            f"Enter amount in <b>USDT</b> (Minimum ${float(DEFAULT_MIN_WITHDRAW_USDT):.2f} USDT):\n\n"
+            f"Enter amount in <b>USDT</b> (Minimum ${float(get_min_withdraw_usdt()):.2f} USDT):\n\n"
             f"/cancel to abort",
         )
         return WITHDRAW_AMT
@@ -249,7 +249,7 @@ async def handle_withdraw_upi_text(update: Update, context: ContextTypes.DEFAULT
     await context.bot.send_message(
         update.effective_chat.id,
         f"💸 <b>Withdraw via UPI</b>\n\n"
-        f"Enter amount in <b>USDT</b> (Minimum ${float(DEFAULT_MIN_WITHDRAW_UPI_USDT):.2f} USDT):\n\n"
+        f"Enter amount in <b>USDT</b> (Minimum ${float(get_min_withdraw_upi()):.2f} USDT):\n\n"
         f"/cancel to abort",
         reply_markup=get_main_reply_keyboard(), parse_mode="HTML"
     )
@@ -287,7 +287,7 @@ async def handle_withdraw_usdt_text(update: Update, context: ContextTypes.DEFAUL
     await context.bot.send_message(
         update.effective_chat.id,
         f"💸 <b>Withdraw via USDT (BEP20)</b>\n\n"
-        f"Enter amount in <b>USDT</b> (Minimum ${float(DEFAULT_MIN_WITHDRAW_USDT):.2f} USDT):\n\n"
+        f"Enter amount in <b>USDT</b> (Minimum ${float(get_min_withdraw_usdt()):.2f} USDT):\n\n"
         f"/cancel to abort",
         reply_markup=get_main_reply_keyboard(), parse_mode="HTML"
     )
@@ -383,7 +383,7 @@ async def receive_withdraw_amt(update: Update, context: ContextTypes.DEFAULT_TYP
         method = context.user_data.get('withdraw_method', 'upi')
         rate = get_usdt_to_inr_rate()
 
-        min_req = DEFAULT_MIN_WITHDRAW_UPI_USDT if method == 'upi' else DEFAULT_MIN_WITHDRAW_USDT
+        min_req = get_min_withdraw_upi() if method == 'upi' else get_min_withdraw_usdt()
         if amount < min_req:
             await update.message.reply_text(
                 f"⚠️ <b>Minimum withdrawal for {method.upper()}: ${float(min_req):.2f} USDT</b>\n\n"

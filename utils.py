@@ -565,6 +565,93 @@ def set_max_withdrawal_amount(amount):
         return False
 
 
+def get_min_withdraw_upi():
+    """Get the minimum UPI withdrawal amount from database."""
+    try:
+        with get_db() as conn:
+            c = conn.cursor()
+            c.execute("SELECT value FROM system_flags WHERE key='min_withdraw_upi_usdt'")
+            result = c.fetchone()
+            if result:
+                return Decimal(result['value'])
+    except Exception as e:
+        logger.error(f"Error fetching min_withdraw_upi: {e}")
+    return DEFAULT_MIN_WITHDRAW_UPI_USDT
+
+
+def set_min_withdraw_upi(amount):
+    """Set the minimum UPI withdrawal amount. Returns True on success."""
+    try:
+        with get_db() as conn:
+            c = conn.cursor()
+            c.execute("""
+                INSERT INTO system_flags (key, value) VALUES ('min_withdraw_upi_usdt', %s)
+                ON CONFLICT (key) DO UPDATE SET value = %s
+            """, (str(amount), str(amount)))
+        return True
+    except Exception as e:
+        logger.error(f"Error setting min_withdraw_upi: {e}")
+        return False
+
+
+def get_min_withdraw_usdt():
+    """Get the minimum USDT withdrawal amount from database."""
+    try:
+        with get_db() as conn:
+            c = conn.cursor()
+            c.execute("SELECT value FROM system_flags WHERE key='min_withdraw_usdt'")
+            result = c.fetchone()
+            if result:
+                return Decimal(result['value'])
+    except Exception as e:
+        logger.error(f"Error fetching min_withdraw_usdt: {e}")
+    return DEFAULT_MIN_WITHDRAW_USDT
+
+
+def set_min_withdraw_usdt(amount):
+    """Set the minimum USDT withdrawal amount. Returns True on success."""
+    try:
+        with get_db() as conn:
+            c = conn.cursor()
+            c.execute("""
+                INSERT INTO system_flags (key, value) VALUES ('min_withdraw_usdt', %s)
+                ON CONFLICT (key) DO UPDATE SET value = %s
+            """, (str(amount), str(amount)))
+        return True
+    except Exception as e:
+        logger.error(f"Error setting min_withdraw_usdt: {e}")
+        return False
+
+
+def get_2fa_video_url():
+    """Get the 2FA instruction video URL from database."""
+    try:
+        with get_db() as conn:
+            c = conn.cursor()
+            c.execute("SELECT value FROM system_flags WHERE key='instruction_video_2fa_url'")
+            result = c.fetchone()
+            if result and result['value']:
+                return result['value']
+    except Exception as e:
+        logger.error(f"Error fetching instruction_video_2fa_url: {e}")
+    return ""
+
+
+def set_2fa_video_url(url: str):
+    """Set the 2FA instruction video URL. Returns True on success."""
+    try:
+        with get_db() as conn:
+            c = conn.cursor()
+            c.execute("""
+                INSERT INTO system_flags (key, value) VALUES ('instruction_video_2fa_url', %s)
+                ON CONFLICT (key) DO UPDATE SET value = %s
+            """, (url, url))
+        return True
+    except Exception as e:
+        logger.error(f"Error setting instruction_video_2fa_url: {e}")
+        return False
+
+
 def get_earnings_stats(user_id, period='all'):
     """Get earnings statistics for different time periods."""
     with get_db() as conn:
